@@ -1,0 +1,66 @@
+---
+title: Sequence — Execute Suite & Generate Report
+---
+sequenceDiagram
+    autonumber
+    actor User as User (CLI/Web)
+    participant API as API Gateway
+    participant WS as WebSocketHub
+    participant Disp as SuiteDispatcher
+    participant K8s as ContainerDeploy<br/>(Docker/K8s)
+    participant ApiR as APIRunner
+    participant UiR as UIRunner
+    participant PerfR as PerfRunner
+    participant Col as ResultCollector
+    participant Flake as Retry/FlakeManager
+    participant Rep as ReportGenerator
+    participant LLM as ModelAPIConnector
+    participant DB as PostgreSQL
+    participant KB as KBOrchestrator
+    participant Obs as Observability
+
+    User->>API: POST /runs {plan_id, env, suites}
+    API->>DB: insert run(status=queued)
+    API->>Disp: dispatch(run_id, suites)
+    API-->>User: 202 {run_id}
+    User->>WS: subscribe(run_id)
+
+    Disp->>K8s: provision workers (api·ui·perf pools)
+    K8s-->>Disp: ready
+
+    par API run
+        Disp->>ApiR: execute(api_tests, fixtures)
+        ApiR->>Obs: emit spans
+        ApiR-->>Col: JUnit XML + logs
+    and UI run
+        Disp->>UiR: execute(ui_tests, seed)
+        UiR->>Obs: traces + screenshots/video
+        UiR-->>Col: Allure results + artifacts
+    and Perf run
+        Disp->>PerfR: execute(k6_scripts, dataset)
+        PerfR->>Obs: metrics stream
+        PerfR-->>Col: k6 summary + time series
+    end
+
+    loop while running
+        Col->>WS: progress events
+        WS-->>User: live updates
+    end
+
+    Col->>Flake: identify flaky failures
+    Flake->>ApiR: retry(failed, n=2)
+    Flake->>UiR: retry(failed, n=2)
+    Flake-->>Col: final results
+
+    Col->>DB: persist(results, artifacts_refs)
+    Col->>Rep: build_report(run_id)
+    Rep->>DB: load run + history
+    Rep->>LLM: summarize failures · cluster root causes
+    LLM-->>Rep: narrative + clusters
+    Rep->>Rep: render HTML/PDF/JSON · trends · coverage
+    Rep->>DB: persist(report_ref)
+    Rep-->>WS: run.completed
+    WS-->>User: report ready
+
+    Rep--)KB: feedback: failure patterns
+    KB->>KB: upsert(test outcomes -> KB)

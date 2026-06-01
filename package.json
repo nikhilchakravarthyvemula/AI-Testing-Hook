@@ -1,0 +1,23 @@
+{
+  "name": "testing-harness",
+  "version": "0.2.0",
+  "type": "module",
+  "private": true,
+  "description": "Architecture-shaped testing harness. See README.md for folder → diagram mapping.",
+  "bin": {
+    "testo": "interfaces/cli/testo.mjs"
+  },
+  "scripts": {
+    "testo": "node interfaces/cli/testo.mjs",
+    "extract": "node context-layer/content-extractor/run.mjs",
+    "extract:live": "ONLY=crawler npm run --silent extract",
+    "extract:code": "SKIP=crawler npm run --silent extract",
+    "extract:fastapi": "ONLY=python-fastapi npm run --silent extract",
+    "crawler": "cd scripts/crawler && npm run all",
+    "graphify": "cd scripts/graphify && ./.venv/bin/python tool.py",
+    "code-ast": "context-layer/content-extractor/_lib/.venv/bin/python context-layer/content-extractor/python-ast/extract.py"
+  },
+  "workspaces": [
+    "scripts/crawler"
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "name": "crawler",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Crawlee-based BFS crawler + OpenAPI spec generator. App-agnostic — config via env vars / testo scan CLI flags.",
+  "scripts": {
+    "login": "node login-once.mjs",
+    "crawl": "node crawl.mjs",
+    "analyze": "node analyze.mjs",
+    "spec": "node spec.mjs",
+    "synthesize": "node synthesize-urls.mjs",
+    "deep-crawl": "node deep-crawl.mjs",
+    "route-tree": "node route-tree.mjs",
+    "api-test": "node openapi-test-gen.mjs",
+    "mindmap": "node mindmap.mjs",
+    "graph": "node graph-viewer.mjs",
+    "endpoint-graph": "node endpoint-graph.mjs",
+    "generate": "node generator/generator.mjs",
+    "e2e-gen": "node generator/e2e.mjs",
+    "test": "playwright test --config=../../tests/playwright.config.mjs",
+    "all": "node crawl.mjs && node analyze.mjs"
+  },
+  "dependencies": {
+    "@playwright/test": "^1.60.0",
+    "crawlee": "^3.16.0",
+    "js-yaml": "^4.1.1",
+    "playwright": "^1.60.0"
+  }
+}

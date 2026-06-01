@@ -1,0 +1,173 @@
+---
+title: AI-Based Automated Testing Hook — Low-Level Architecture (Main)
+---
+flowchart TB
+    classDef llm fill:#e9d5ff,stroke:#7e22ce,color:#3b0764
+    classDef store fill:#fde68a,stroke:#b45309,color:#451a03
+    classDef svc fill:#bae6fd,stroke:#0369a1,color:#0c4a6e
+    classDef gen fill:#fbcfe8,stroke:#be185d,color:#500724
+    classDef exec fill:#bbf7d0,stroke:#15803d,color:#052e16
+    classDef infra fill:#a7f3d0,stroke:#0f766e,color:#022c22
+    classDef adapter fill:#fed7aa,stroke:#c2410c,color:#431407
+
+    %% ============= INTERFACES =============
+    subgraph IF[Interfaces]
+        direction LR
+        subgraph CLI[CLI]
+            CLI_R[CLIRouter / Click]:::svc
+            CLI_H[CommandHandlers<br/>generate · run · report · kb-sync]:::svc
+            CLI_C[ConfigLoader · .env / yaml]:::svc
+            CLI_O[OutputFormatter<br/>json · table · rich]:::svc
+        end
+        subgraph WEB[Web UI]
+            WEB_FE[React Frontend<br/>Dashboard · TestConfig · Results · KBExplorer]:::svc
+            WEB_API[API Gateway<br/>FastAPI / REST + WS]:::svc
+            WEB_AUTH[Auth<br/>OAuth2 · JWT · RBAC]:::svc
+            WEB_WS[WebSocketHub<br/>live run progress]:::svc
+        end
+    end
+
+    %% ============= KNOWLEDGE SOURCES =============
+    subgraph KS[Knowledge Source Adapters]
+        direction LR
+        K_GIT[GitAdapter<br/>clone · diff · blame]:::adapter
+        K_CODE[CodebaseIndexer<br/>tree-sitter AST · symbol graph]:::adapter
+        K_JIRA[JiraConnector<br/>issues · epics · ACs]:::adapter
+        K_CONF[ConfluenceConnector<br/>spaces · pages]:::adapter
+        K_LINK[LiveLinkScraper<br/>HTTP fetch · Readability]:::adapter
+        K_TRIBE[TribalKnowledgeLoader<br/>md · transcripts · slack export]:::adapter
+        K_QA[Q&A Bot<br/>RAG over KB]:::llm
+    end
+
+    %% ============= KNOWLEDGE BASE =============
+    subgraph KB[Knowledge Base — Single Source of Truth]
+        direction LR
+        KB_ORCH[KBOrchestrator<br/>upsert · query · diff]:::svc
+        KB_CHUNK[Chunker + Embedder<br/>semantic split · text-embed-3]:::llm
+        KB_VEC[(VectorStore<br/>pgvector)]:::store
+        KB_META[(Metadata<br/>PostgreSQL)]:::store
+        KB_DOC[(DocumentStore<br/>raw + chunks · S3 / FS)]:::store
+        KB_SYNC[IncrementalSync<br/>webhook · cron]:::svc
+    end
+
+    %% ============= CONTEXT LAYER =============
+    subgraph CTX[Context Layer]
+        direction LR
+        C_EXT[ContentExtractor<br/>LLM · entities · ACs · endpoints]:::llm
+        C_GAP[GapAnalyzer<br/>coverage diff · missing flows]:::svc
+        C_SYN[KnowledgeSynthesizer<br/>cross-source merge · dedup]:::svc
+        C_FEAT[FeatureExtractor<br/>routes · components · SLAs]:::svc
+        C_MIND[MindMapBuilder<br/>feature → scenario tree]:::svc
+    end
+
+    %% ============= GENERATION LAYER =============
+    subgraph GEN[Generation Layer]
+        direction TB
+        G_PLAN[TestPlanCreator<br/>strategy · scope · priority]:::gen
+        subgraph G_SCRIPT[TestScriptGenerator]
+            direction LR
+            G_API[APITestGen<br/>pytest · REST Assured<br/>OpenAPI · contract tests]:::gen
+            G_UI[UITestGen<br/>Playwright · Selenium<br/>POM · selectors]:::gen
+            G_PERF[PerfTestGen<br/>k6 · Locust · JMeter<br/>load · stress · soak]:::gen
+        end
+        G_MOCK[MockDataCreator<br/>Faker · LLM realistic · constraint solver]:::gen
+        G_VAL[Validator<br/>lint · smell detect · LLM-judge · coverage]:::gen
+    end
+
+    %% ============= EXECUTION LAYER =============
+    subgraph EX[Execution Layer]
+        direction LR
+        E_DISP[SuiteDispatcher<br/>routes by suite type]:::exec
+        E_RUN_API[APIRunner<br/>pytest worker pool]:::exec
+        E_RUN_UI[UIRunner<br/>Playwright workers · grid]:::exec
+        E_RUN_PERF[PerfRunner<br/>k6 distributed]:::exec
+        E_COL[ResultCollector<br/>JUnit · Allure · logs · traces]:::exec
+        E_RETRY[Retry / FlakeManager]:::exec
+        E_REP[ReportGenerator<br/>HTML · PDF · JSON · trends]:::exec
+    end
+
+    %% ============= CROSS-CUTTING =============
+    subgraph INFRA[Cross-Cutting Infrastructure]
+        direction LR
+        I_LLM[ModelAPIConnector<br/>Anthropic · OpenAI · local<br/>router · rate-limit · cost · cache]:::infra
+        I_AGENT[AgenticHarness<br/>tool-use loop · memory · planner]:::infra
+        I_SKILL[SkillRegister<br/>catalog · loader · perms]:::infra
+        I_DB[(PostgreSQL<br/>runs · tests · results · kb · embeddings)]:::store
+        I_DEP[ContainerDeploy<br/>Dockerfile · compose · K8s · CI]:::infra
+        I_OBS[Observability<br/>OpenTelemetry · Prometheus · Sentry]:::infra
+        I_SEC[Secrets / Vault]:::infra
+    end
+
+    %% ============= FLOWS =============
+    CLI_H --> WEB_API
+    WEB_API --> WEB_AUTH
+    WEB_API --> WEB_WS
+
+    CLI_H --> KB_ORCH
+    WEB_API --> KB_ORCH
+
+    K_GIT --> KB_SYNC
+    K_CODE --> KB_SYNC
+    K_JIRA --> KB_SYNC
+    K_CONF --> KB_SYNC
+    K_LINK --> KB_SYNC
+    K_TRIBE --> KB_SYNC
+    KB_SYNC --> KB_CHUNK --> KB_VEC
+    KB_SYNC --> KB_DOC
+    KB_SYNC --> KB_META
+    KB_ORCH --> KB_VEC
+    KB_ORCH --> KB_META
+    KB_ORCH --> KB_DOC
+    K_QA --> KB_ORCH
+
+    KB_ORCH --> C_EXT
+    C_EXT --> C_SYN
+    C_SYN --> C_GAP
+    C_SYN --> C_FEAT
+    C_FEAT --> C_MIND
+    C_GAP --> C_MIND
+
+    C_MIND --> G_PLAN
+    G_PLAN --> G_API
+    G_PLAN --> G_UI
+    G_PLAN --> G_PERF
+    G_API --> G_MOCK
+    G_UI --> G_MOCK
+    G_PERF --> G_MOCK
+    G_API --> G_VAL
+    G_UI --> G_VAL
+    G_PERF --> G_VAL
+
+    G_VAL --> E_DISP
+    E_DISP --> E_RUN_API
+    E_DISP --> E_RUN_UI
+    E_DISP --> E_RUN_PERF
+    E_RUN_API --> E_COL
+    E_RUN_UI --> E_COL
+    E_RUN_PERF --> E_COL
+    E_COL --> E_RETRY
+    E_RETRY --> E_REP
+    E_REP -. results feedback .-> KB_ORCH
+
+    %% Infra usage (dashed)
+    C_EXT -. uses .-> I_LLM
+    KB_CHUNK -. uses .-> I_LLM
+    K_QA -. uses .-> I_LLM
+    G_PLAN -. uses .-> I_LLM
+    G_API -. uses .-> I_LLM
+    G_UI -. uses .-> I_LLM
+    G_PERF -. uses .-> I_LLM
+    G_MOCK -. uses .-> I_LLM
+    G_VAL -. uses .-> I_LLM
+    G_PLAN -. orchestrated by .-> I_AGENT
+    I_AGENT -. loads .-> I_SKILL
+    KB_META -. persists .-> I_DB
+    E_COL -. persists .-> I_DB
+    E_REP -. reads .-> I_DB
+    I_DEP -. wraps .-> IF
+    I_DEP -. wraps .-> GEN
+    I_DEP -. wraps .-> EX
+    I_OBS -. traces .-> EX
+    I_OBS -. traces .-> GEN
+    I_SEC -. injects .-> I_LLM
+    I_SEC -. injects .-> KS

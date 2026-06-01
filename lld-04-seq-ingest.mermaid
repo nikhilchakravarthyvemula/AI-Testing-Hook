@@ -1,0 +1,54 @@
+---
+title: Sequence — Knowledge Ingestion & Indexing
+---
+sequenceDiagram
+    autonumber
+    participant Trig as Trigger<br/>(webhook · cron · manual CLI)
+    participant Sync as IncrementalSync
+    participant Git as GitAdapter
+    participant Code as CodebaseIndexer
+    participant Jira as JiraConnector
+    participant Conf as ConfluenceConnector
+    participant LinkSrc as LiveLinkScraper
+    participant Tribe as TribalKnowledgeLoader
+    participant Chunk as Chunker+Embedder
+    participant LLM as ModelAPIConnector
+    participant Vec as VectorStore (pgvector)
+    participant Meta as Metadata (Postgres)
+    participant Doc as DocumentStore
+    participant Orch as KBOrchestrator
+    participant QA as Q&A Bot
+
+    Trig->>Sync: tick / event {source, since}
+
+    par Source pulls
+        Sync->>Git: pull changes since LAST_SHA
+        Git-->>Sync: diffs · files · commit meta
+        Sync->>Code: index AST + symbols
+        Code-->>Sync: symbol graph
+    and
+        Sync->>Jira: fetch updated issues
+        Jira-->>Sync: issues · ACs · labels
+    and
+        Sync->>Conf: fetch updated pages
+        Conf-->>Sync: pages · attachments
+    and
+        Sync->>LinkSrc: fetch URLs (whitelist)
+        LinkSrc-->>Sync: cleaned HTML/text
+    and
+        Sync->>Tribe: load manual drops
+        Tribe-->>Sync: markdown · transcripts
+    end
+
+    Sync->>Chunk: normalize + split (semantic, 800-1200 tok)
+    Chunk->>LLM: embed(batch)
+    LLM-->>Chunk: vectors[1536]
+    Chunk->>Vec: upsert(id, vector, source_ref)
+    Chunk->>Doc: store raw + chunks
+    Chunk->>Meta: upsert(doc_id, source, tags, hash, version)
+
+    Sync->>Orch: notify(updated_ids)
+    Orch->>Orch: invalidate dependent caches
+    Orch-->>QA: refresh retrieval index
+
+    Note over QA,Vec: Query path<br/>QA → Orch.query(q) → Vec.knn + Meta.filter → LLM.answer

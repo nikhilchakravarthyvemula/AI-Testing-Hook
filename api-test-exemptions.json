@@ -1,0 +1,15 @@
+{
+  "_comment": "Endpoints the api-test-generator must NEVER execute, because hitting them breaks the authenticated session the rest of the run depends on. Entries are merged ON TOP of the built-in defaults (password reset/forgot/change, logout/revoke, DELETE /me). Each entry is a path regex string (any method) or {\"method\": <VERB>, \"path\": <regex>}. Matching is case-insensitive. Edit per target.",
+
+  "exempt": [
+    "/password",
+    "(?:forgot|reset|change|update)[-_]?password",
+    "/logout",
+
+    { "method": "DELETE", "path": "/users/" },
+    { "method": "PUT",    "path": "/users/" },
+    { "method": "PATCH",  "path": "/users/" },
+    { "method": "PUT",    "path": "/me$" },
+    { "method": "PATCH",  "path": "/me$" }
+  ]
+}

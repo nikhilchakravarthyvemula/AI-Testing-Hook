@@ -1,0 +1,4 @@
+openharness-ai
+pydantic>=2
+# graphify's OpenAI-compatible backends (gemini/kimi/ollama/openai) require this
+openai

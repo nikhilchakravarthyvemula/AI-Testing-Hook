@@ -1,0 +1,17 @@
+
+# secrets
+.env
+.env.backup.*
+
+# build / deps / caches
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+
+# generated crawl/test artifacts (regenerable)
+output/
+
+# local harness config
+.claude/settings.local.json
