@@ -7,9 +7,10 @@
 // other architecture-diagram boxes.
 //
 //   testo scan        → context-layer       (content extraction)
+//   testo generate    → generation-layer    (api-test-generator)
+//   testo run         → execution-layer     (test executor)
+//   testo pipeline    → orchestration-layer (scan → generate → execute, wrapped)
 //   testo plan        → generation-layer    (test plan creator)     [planned]
-//   testo generate    → generation-layer    (test script generator) [planned]
-//   testo run         → execution-layer     (test executor)         [planned]
 //   testo report      → execution-layer     (report generator)      [planned]
 //
 // No options parsed by the top-level — each subcommand owns its own
@@ -46,6 +47,14 @@ const COMMANDS = {
   generate: {
     description: 'Generate tests from indexed context. `testo generate api-tests` is the first kind.',
     run: path.join(REPO_ROOT, 'interfaces', 'cli', 'commands', 'generate.mjs'),
+  },
+  run: {
+    description: 'Execute an already-generated test suite (execution-layer) → results.json.',
+    run: path.join(REPO_ROOT, 'interfaces', 'cli', 'commands', 'run.mjs'),
+  },
+  pipeline: {
+    description: 'Run the whole harness end-to-end: scan → generate → execute (orchestration-layer).',
+    run: path.join(REPO_ROOT, 'interfaces', 'cli', 'commands', 'pipeline.mjs'),
   },
 };
 

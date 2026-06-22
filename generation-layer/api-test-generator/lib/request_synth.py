@@ -98,6 +98,7 @@ def synthesize_body(
     db_tables: dict[str, dict] | None = None,
     mock_data: dict[str, dict] | None = None,
     openapi: dict[str, dict] | None = None,
+    api_spec: dict[str, dict] | None = None,
 ) -> Optional[dict]:
     """Pick or build a request body for an endpoint. Returns None when no
     body is appropriate (e.g. GET/HEAD).
@@ -122,6 +123,13 @@ def synthesize_body(
     # `/account`) are the highest-risk for credential rotation: their bodies
     # always include the auth fields. Apply stricter stripping there.
     is_self_mutating = method in ("PUT", "PATCH") and _looks_like_self_endpoint(path)
+
+    # 0. The merged api-spec contract (crawler-OpenAPI ∪ mock-data, already
+    #    redacted) — highest priority: it's the canonical test fixture.
+    if api_spec and key in api_spec:
+        ex = (api_spec[key].get("requestBody") or {}).get("example")
+        if isinstance(ex, dict) and ex:
+            return _strip_dangerous_fields(ex, aggressive=is_self_mutating)
 
     # 1. Real bodies from the mock-data bundle.
     if mock_data and key in mock_data:
@@ -349,6 +357,25 @@ def load_openapi_index(openapi_bundle_path) -> dict[str, dict]:
     """Load `output/openapi/bundle.json` into a `METHOD:path → entry` dict.
     Returns {} when the bundle is missing — fallback behavior is unchanged."""
     return _load_endpoint_index(openapi_bundle_path)
+
+
+def load_api_spec_index(api_spec_path) -> dict[str, dict]:
+    """Load `output/indexed_output/api-spec.json` into a `METHOD:path → primary`
+    dict. This is an INDEXED TOPIC (items[], not facts.endpoints[]), so its
+    loader differs. Returns {} when missing — fallback behavior unchanged."""
+    import json
+    from pathlib import Path
+    p = Path(api_spec_path)
+    if not p.is_file():
+        return {}
+    bundle = json.loads(p.read_text(encoding="utf-8"))
+    out: dict[str, dict] = {}
+    for item in bundle.get("items") or []:
+        primary = item.get("primary") or {}
+        key = item.get("id") or f"{(primary.get('method') or '').upper()}:{primary.get('path') or ''}"
+        if key:
+            out[key] = primary
+    return out
 
 
 def _load_endpoint_index(bundle_path) -> dict[str, dict]:

@@ -46,8 +46,12 @@ from lib.reporter import (                                          # noqa: E402
     write_run_artifact,
     write_summary,
 )
-from lib.request_synth import synthesize_body                       # noqa: E402
+from lib.request_synth import synthesize_body, load_api_spec_index  # noqa: E402
 from lib.test_runner import TestResult, execute_curl                # noqa: E402
+from lib.repair import repair_request_body, REPAIRABLE_STATUSES      # noqa: E402
+
+# Max auto-repair attempts on a curl whose body the server rejects (422/400).
+MAX_REPAIR_ATTEMPTS = 3
 
 
 # ── args + result ──────────────────────────────────────────────────────────
@@ -59,6 +63,7 @@ class ApiTestGeneratorArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     apis_json:      Path = Path("output/indexed_output/apis.json")
+    api_spec_json:  Path = Path("output/indexed_output/api-spec.json")
     db_schema_json: Path = Path("output/indexed_output/db-schema.json")
     base_url:       Optional[str] = Field(
         default=None,
@@ -160,6 +165,31 @@ class ApiTestGeneratorSkill:
         # Second-strongest signal: gives us a body for endpoints the
         # crawler never observed posting to.
         openapi = load_openapi_index(openapi_path)
+        # The merged per-endpoint test contract (headers + request body +
+        # expected response bodies). Primary signal for body + headers +
+        # response assertion; keyed `METHOD:path`. Empty dict if absent.
+        api_spec = load_api_spec_index(_resolve(repo_root, args.api_spec_json))
+        # If api-spec.json was produced by the verifier (carries a top-level
+        # `verification` block), treat it as the AUTHORITATIVE roster: drop any
+        # api_items it removed (phantom / stripped-prefix duplicates). No-op when
+        # the verifier hasn't run, so the raw roster is used unchanged.
+        api_spec_path = _resolve(repo_root, args.api_spec_json)
+        try:
+            _raw_spec = json.loads(api_spec_path.read_text(encoding="utf-8")) if api_spec_path.is_file() else {}
+        except Exception:
+            _raw_spec = {}
+        if _raw_spec.get("verification") and api_spec:
+            def _spec_key(it):
+                p = it.get("primary") or {}
+                return f"{(p.get('method') or '').upper()}:{p.get('path') or ''}"
+            _before = len(api_items)
+            api_items = [it for it in api_items if _spec_key(it) in api_spec]
+            if len(api_items) != _before:
+                print(
+                    f"[api-test-generator] verified api-spec roster: {_before} → {len(api_items)} "
+                    f"(dropped {_before - len(api_items)} unverified/phantom)",
+                    flush=True,
+                )
         # `fallback_base_url` is used ONLY for APIs the crawler never observed
         # live. For observed APIs we use their actual `primary.origin` — most
         # apps split frontend (e.g. localhost:3000) and backend (e.g.
@@ -266,7 +296,8 @@ class ApiTestGeneratorSkill:
                 print(f"  ⊘ {api_method:6} {api_path:60} → skipped (exempt: {exempt_reason})", flush=True)
                 continue
 
-            body    = synthesize_body(item, db_tables=db_tables, mock_data=mock_data, openapi=openapi)
+            body    = synthesize_body(item, db_tables=db_tables, mock_data=mock_data, openapi=openapi, api_spec=api_spec)
+            spec    = api_spec.get(api_id)
             # Per-API origin: crawler-observed wins; user's --url is the fallback.
             api_base_url = _origin_for(item) or fallback_base_url
             # Real path-param values the crawler saw the frontend send for
@@ -280,6 +311,7 @@ class ApiTestGeneratorSkill:
                 auth_scheme=token_type,
                 timeout_s=args.timeout_s,
                 path_params=path_params,
+                spec=spec,
             )
             write_curl_script(curls_dir, api_id, pretty)
             curls_generated += 1
@@ -297,6 +329,41 @@ class ApiTestGeneratorSkill:
                 request_body=body, request_headers=_headers_from_argv(argv),
                 timeout_s=args.timeout_s + 5,
             )
+            _assert_response(tr, spec)   # additive: records expected_status/body_match/missing_keys
+
+            # ── self-repair loop ────────────────────────────────────────────
+            # A 422/400 means the request BODY is wrong, and the server's error
+            # tells us how. Patch the body from that error, re-run, up to
+            # MAX_REPAIR_ATTEMPTS. The final (repaired) curl is what we persist,
+            # so later replays use the body that actually works.
+            cur_body, repairs = body, 0
+            openapi_ep = openapi.get(api_id)
+            while (tr.http_status in REPAIRABLE_STATUSES
+                   and repairs < MAX_REPAIR_ATTEMPTS):
+                fixed = repair_request_body(cur_body, tr.response_body, openapi_ep)
+                if not fixed or fixed == cur_body:
+                    break  # nothing actionable left — stop retrying
+                repairs += 1
+                cur_body = fixed
+                argv, pretty = build_curl(
+                    base_url=api_base_url, api_item=item, body=cur_body,
+                    auth_token=token, auth_scheme=token_type,
+                    timeout_s=args.timeout_s, path_params=path_params, spec=spec,
+                )
+                tr = execute_curl(
+                    argv=argv, api_id=api_id, method=method, url=url,
+                    request_body=cur_body, request_headers=_headers_from_argv(argv),
+                    timeout_s=args.timeout_s + 5,
+                )
+                _assert_response(tr, spec)
+                print(f"      ↻ repair {repairs}/{MAX_REPAIR_ATTEMPTS} {method} {primary.get('path','?')} → {tr.http_status}", flush=True)
+                if tr.ok:
+                    break
+            tr.repair_attempts = repairs
+            if repairs:
+                # Persist the repaired curl as the stored test (overwrites the
+                # original) so the saved suite is the runnable, validated one.
+                write_curl_script(curls_dir, api_id, pretty)
             test_results.append(tr)
             # Persist the full request + response for this test under runs/
             # — easy to grep, easy to diff between runs, easy to attach
@@ -354,6 +421,25 @@ class ApiTestGeneratorSkill:
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
+
+
+def _assert_response(tr: TestResult, spec: Optional[dict]) -> None:
+    """Record contract expectations on the result — ADDITIVE, never flips
+    `tr.ok`. Sets expected_status, body_match (top-level response keys ⊇ the
+    contract's example keys; presence not value-equality to avoid flaky
+    ids/timestamps), and missing_keys. No-op when there's no contract."""
+    if not spec:
+        return
+    expected = spec.get("expectedStatus")
+    tr.expected_status = expected
+    # contract example body for the observed (or expected) status
+    responses = spec.get("responses") or {}
+    slot = responses.get(str(tr.http_status)) or responses.get(str(expected)) or {}
+    example = ((slot.get("body") or {}).get("example"))
+    if isinstance(example, dict) and isinstance(tr.response_body, dict):
+        missing = [k for k in example.keys() if k not in tr.response_body]
+        tr.missing_keys = missing
+        tr.body_match = (len(missing) == 0)
 
 
 def _detect_repo_root() -> Path:

@@ -1,4 +1,4 @@
-// Crawler source extractor — thin wrapper around scripts/crawler/.
+// Crawler source extractor — drives the crawler engine in this folder.
 //
 // Runs the existing crawler with whatever env vars are set, then reads its
 // outputs (routes.json, pages.json, click-graph.json) and emits a
@@ -9,7 +9,7 @@
 // run.mjs auto-discovery convention). The Knowledge Base layer maps it
 // to the architecture-diagram bucket "Live Links".
 //
-// The crawler itself stays put at scripts/crawler/ — we just shell out to it.
+// The crawler engine lives in this folder; we run its stages with node.
 
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -17,15 +17,17 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { provenance, DiscoveryTier } from '../../../knowledge-base/schema.mjs';
-import { adviseOn } from '../../../scripts/crawler/llm-advisor/index.mjs';
+import { adviseOn } from './llm-advisor/index.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 
-const CRAWLER_DIR = path.join(REPO_ROOT, 'scripts', 'crawler');
+// The crawler engine now lives alongside this file (moved out of
+// scripts/crawler). We invoke its stages directly with node — no npm seam.
+const CRAWLER_STAGES = ['crawl.mjs', 'analyze.mjs', 'spec.mjs', 'route-tree.mjs'];
 const CRAWLER_OUT = path.join(REPO_ROOT, 'output', 'crawler');
 // Crawler-specific output folder. The crawler subsystem already writes
-// raw data + reports under output/crawler/{data,reports}/ via scripts/crawler;
+// raw data + reports under output/crawler/{data,reports}/ via the crawler stages;
 // the bundle.json sits alongside those as the "what the indexer reads".
 const OUT_DIR = path.join(REPO_ROOT, 'output', 'crawler');
 const OUT_FILE = path.join(OUT_DIR, 'bundle.json');
@@ -42,10 +44,13 @@ async function main() {
 
   if (!SKIP_CRAWL) {
     console.log('[crawler] running the crawler pipeline (set SKIP_CRAWL=1 to use prior output)…');
-    execFileSync('npm', ['run', '--silent', 'all'], {
-      cwd: CRAWLER_DIR,
-      stdio: 'inherit',
-    });
+    for (const stage of CRAWLER_STAGES) {
+      execFileSync(process.execPath, [path.join(__dirname, stage)], {
+        cwd: REPO_ROOT,
+        stdio: 'inherit',
+        env: process.env,
+      });
+    }
   } else {
     console.log('[crawler] SKIP_CRAWL=1 — reusing existing output/crawler/');
   }
@@ -97,114 +102,143 @@ async function main() {
 // ── Part B: per-page intent annotation ────────────────────────────────────
 
 
+// Concurrency + caps (env-overridable). The old code was strictly serial —
+// one ~30s reasoning-LLM call after another — so a 34-page crawl spent ~80 min
+// here. Now we dedup aggressively, cap table rows, and run batches concurrently.
+const INTENT_CONCURRENCY = Number(process.env.INTENT_CONCURRENCY || 6);
+const INTENT_BATCH_SIZE  = Number(process.env.INTENT_BATCH_SIZE || 15);
+// Cap applies ONLY to table-row clickables (per page). Nav links + buttons +
+// other clicks are never capped. Same-table rows already collapse to one
+// signature via dedup, so this only bites pathological pages (>N distinct tables).
+const INTENT_ROW_CAP     = Number(process.env.INTENT_ROW_CAP || 12);
+
+// Run async tasks with a fixed concurrency cap.
+async function _runPool(items, concurrency, fn) {
+  let next = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (next < items.length) {
+      const idx = next++;
+      await fn(items[idx], idx);
+    }
+  });
+  await Promise.all(workers);
+}
+
+// A dedup signature: collapses (a) the same nav/button repeated across every
+// page, and (b) all rows of one table (selector nth-indices wildcarded) to a
+// single label. Links also key on a normalized href shape so genuinely
+// different links don't over-collapse.
+function _sigOf(item) {
+  const selPat = String(item.selector || '')
+    .replace(/:nth-(of-type|child)\(\d+\)/g, ':nth(*)')
+    .replace(/\b\d{2,}\b/g, '#');
+  const text = String(item.text || '').trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 40);
+  if (item.kind === 'link') return `L|${selPat}|${_hrefShape(item.href)}`;
+  return `B|${selPat}|${text}`;
+}
+function _hrefShape(href) {
+  if (!href) return '';
+  try {
+    const u = new URL(href, 'http://x');
+    return u.pathname.replace(/\/[0-9a-f-]{6,}/gi, '/#').replace(/\/\d+/g, '/#');
+  } catch { return String(href).slice(0, 40); }
+}
+function _isRow(item) {
+  return /(\btr\b|tbody|\[role=['"]?row|row→first-cell|>\s*tr)/i.test(String(item.selector || ''));
+}
+
 async function annotateClickableIntents(pages) {
   if (!pages.length) return;
-  let annotatedPages = 0;
-  let annotatedIntents = 0;
-  let failedBatches = 0;
   const t0 = Date.now();
-  // MiniMax-M2.7 is slow on big prompts. Chunking ~15 clickables per
-  // call keeps each LLM round under ~60s and lets a single timeout
-  // on a noisy page not poison the whole page's annotations.
-  const BATCH_SIZE = 15;
+  const seen = new Map();          // sig → intent (global dedup, persists across pages)
+  const queued = new Set();        // sigs already queued for labeling
 
-  // Pre-count pages with clickables so we can show "page N/M" progress
-  // against the actual workload (skipping empty pages doesn't make sense).
+  // ── plan: dedup (global + page) + table-row cap → unique reps to label ────
+  const plans = [];                // { page, items, sigByIdx }
+  const toLabel = [];              // { sig, item, ctx } representatives needing an LLM call
+  let totalItems = 0;
   const workable = pages.filter(p => _flattenClickables(p.clickables).length > 0);
-  console.log(
-    `[crawler] intent-extract: ${workable.length}/${pages.length} pages have clickables ` +
-    `(LLM batch size ${BATCH_SIZE}, ~30-60s per batch on MiniMax-M2.7)`
-  );
-
-  let pageIdx = 0;
   for (const page of pages) {
     const items = _flattenClickables(page.clickables);
-    if (items.length === 0) continue;
-    pageIdx++;
-
-    const totalBatches = Math.ceil(items.length / BATCH_SIZE);
-    const pageUrl = page.finalUrl || page.requestedUrl || '(unknown)';
-    const shortUrl = _shortenUrl(pageUrl);
-    const pageT0 = Date.now();
-    console.log(
-      `[crawler] intent-extract: page ${pageIdx}/${workable.length} — ${shortUrl} ` +
-      `(${items.length} clickables, ${totalBatches} batch${totalBatches > 1 ? 'es' : ''})`
-    );
-
-    // Build a flat array of intent objects (1-to-1 with `items`).
-    const annotations = new Array(items.length).fill(null);
-    let pageHadAny = false;
-    let pageHadFail = false;
-
-    let batchNum = 0;
-    for (let start = 0; start < items.length; start += BATCH_SIZE) {
-      batchNum++;
-      const batch = items.slice(start, start + BATCH_SIZE);
-      const batchT0 = Date.now();
-      const advice = await adviseOn({
-        kind: 'intent-extract',
-        input: {
-          url: page.finalUrl || page.requestedUrl,
-          title: page.title || '',
-          section: page.section || null,
-          clickables: batch,
-          contextSnippet: page.headings
-            ? JSON.stringify(page.headings).slice(0, 400)
-            : '',
-        },
-      });
-      const batchMs = Date.now() - batchT0;
-      if (!advice?.recommendation?.intents) {
-        pageHadFail = true;
-        if (totalBatches > 1) {
-          console.log(`[crawler]   ↳ batch ${batchNum}/${totalBatches} no response (${batchMs}ms)`);
-        }
-        continue;
+    if (!items.length) continue;
+    const sigByIdx = items.map(_sigOf);
+    plans.push({ page, items, sigByIdx });
+    totalItems += items.length;
+    const ctx = {
+      url: page.finalUrl || page.requestedUrl,
+      title: page.title || '',
+      section: page.section || null,
+      contextSnippet: page.headings ? JSON.stringify(page.headings).slice(0, 400) : '',
+    };
+    let rowSigsThisPage = 0;
+    for (let i = 0; i < items.length; i++) {
+      const sig = sigByIdx[i];
+      if (seen.has(sig) || queued.has(sig)) continue;   // labeled elsewhere / already queued
+      if (_isRow(items[i])) {
+        if (rowSigsThisPage >= INTENT_ROW_CAP) continue; // table-row cap (rows only)
+        rowSigsThisPage++;
       }
-      let batchGot = 0;
-      for (const intent of advice.recommendation.intents) {
-        // intent.i is 1-based within the BATCH; map back to global index.
-        const globalIdx = start + (intent.i - 1);
-        if (globalIdx >= 0 && globalIdx < items.length) {
-          annotations[globalIdx] = intent;
-          pageHadAny = true;
-          batchGot++;
-        }
-      }
-      if (totalBatches > 1) {
-        console.log(`[crawler]   ↳ batch ${batchNum}/${totalBatches} ${batchGot}/${batch.length} ok (${batchMs}ms)`);
-      }
+      queued.add(sig);
+      toLabel.push({ sig, item: items[i], ctx });
     }
-
-    if (pageHadFail && !pageHadAny) failedBatches++;
-    if (!pageHadAny) {
-      console.log(`[crawler]   ↳ page got 0 intents (${Date.now() - pageT0}ms)`);
-      continue;
-    }
-
-    // Merge annotations back onto buttons[] then links[] in flatten order.
-    let i = 0;
-    let pageGot = 0;
-    if (Array.isArray(page.clickables?.buttons)) {
-      for (const btn of page.clickables.buttons) {
-        const intent = annotations[i++];
-        if (intent) { btn.intent = stripIndex(intent); annotatedIntents++; pageGot++; }
-      }
-    }
-    if (Array.isArray(page.clickables?.links)) {
-      for (const lnk of page.clickables.links) {
-        const intent = annotations[i++];
-        if (intent) { lnk.intent = stripIndex(intent); annotatedIntents++; pageGot++; }
-      }
-    }
-    annotatedPages++;
-    console.log(`[crawler]   ↳ ${pageGot}/${items.length} intents (${Date.now() - pageT0}ms)`);
   }
+
+  // ── batch the reps (grouped by page-context) and run concurrently ────────
+  const batches = [];
+  for (let i = 0; i < toLabel.length; i += INTENT_BATCH_SIZE) {
+    const slice = toLabel.slice(i, i + INTENT_BATCH_SIZE);
+    batches.push({ ctx: slice[0].ctx, reps: slice });   // ctx of first rep — good enough for labeling
+  }
+  console.log(
+    `[crawler] intent-extract: ${totalItems} clickables on ${workable.length} pages → ` +
+    `${toLabel.length} unique to label after dedup (global+page, table-row cap ${INTENT_ROW_CAP}); ` +
+    `${batches.length} batches @ concurrency ${INTENT_CONCURRENCY}`
+  );
+
+  let doneBatches = 0, labeled = 0, failedBatches = 0;
+  await _runPool(batches, INTENT_CONCURRENCY, async (batch) => {
+    const advice = await adviseOn({
+      kind: 'intent-extract',
+      input: {
+        url: batch.ctx.url, title: batch.ctx.title, section: batch.ctx.section,
+        clickables: batch.reps.map(r => ({ kind: r.item.kind, text: r.item.text, selector: r.item.selector, href: r.item.href })),
+        contextSnippet: batch.ctx.contextSnippet,
+      },
+    });
+    doneBatches++;
+    if (!advice?.recommendation?.intents) { failedBatches++; }
+    else {
+      for (const intent of advice.recommendation.intents) {
+        const rep = batch.reps[intent.i - 1];           // intent.i is 1-based within the batch
+        if (rep) { seen.set(rep.sig, stripIndex(intent)); labeled++; }
+      }
+    }
+    if (batches.length > 4 && doneBatches % 5 === 0) {
+      console.log(`[crawler]   ↳ intent batches ${doneBatches}/${batches.length} (${labeled} labeled)`);
+    }
+  });
+
+  // ── propagate labels back to every item that shares a signature ──────────
+  let annotatedPages = 0, annotatedIntents = 0;
+  for (const { page, items, sigByIdx } of plans) {
+    let i = 0, pageGot = 0;
+    for (const btn of page.clickables?.buttons ?? []) {
+      const intent = seen.get(sigByIdx[i++]);
+      if (intent) { btn.intent = intent; annotatedIntents++; pageGot++; }
+    }
+    for (const lnk of page.clickables?.links ?? []) {
+      const intent = seen.get(sigByIdx[i++]);
+      if (intent) { lnk.intent = intent; annotatedIntents++; pageGot++; }
+    }
+    if (pageGot) annotatedPages++;
+  }
+
   const ms = Date.now() - t0;
-  const failMsg = failedBatches > 0 ? `  (${failedBatches} page(s) had no usable LLM response)` : '';
+  const failMsg = failedBatches > 0 ? `  (${failedBatches} batch(es) had no usable LLM response)` : '';
   console.log(
     `[crawler] intent-extract: annotated ${annotatedIntents} clickables across ` +
-    `${annotatedPages}/${pages.length} pages in ${(ms / 1000).toFixed(1)}s${failMsg}`
+    `${annotatedPages}/${pages.length} pages — ${labeled} unique LLM labels reused via dedup — ` +
+    `in ${(ms / 1000).toFixed(1)}s${failMsg}`
   );
 }
 

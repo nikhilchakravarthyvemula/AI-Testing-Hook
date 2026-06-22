@@ -1,0 +1,126 @@
+ID,Issue Type,Summary,Component,Workstream,Owner,Status,Week #,Start Date,Due Date,Description
+TH-001,Story,testo CLI (scan / generate / ask),CLI,Platform / CLI,Nikhil Vemula,Done,1,2026-05-15,2026-05-15,"Command-line entrypoint that orchestrates scan, generate and ask."
+TH-002,Story,Crawler engine (BFS + capture),Crawler,Discovery & Context,Nikhil Vemula,Done,1,2026-05-18,2026-05-18,"Crawlee + Playwright BFS crawler with full network capture, login and safe-click pass."
+TH-003,Story,Graphify code-graph extractor,Context: Content Extractor,Discovery & Context,Nikhil Vemula,Done,1,2026-05-19,2026-05-19,LLM-enriched code knowledge graph (detect -> AST -> semantic).
+TH-004,Story,"Set up Jira board, sprints + workflow",Project Mgmt,Project Management,Nikhil Kalsi,Backlog,1,2026-05-15,2026-05-19,Project + board setup.
+TH-005,Story,Graphify run engine,Crawler,Discovery & Context,Nikhil Vemula,Done,1,2026-05-20,2026-05-20,Graphify CLI runner with automatic LLM backend selection.
+TH-006,Story,DB-schema extractor (AST + LLM),Context: Content Extractor,Discovery & Context,Nikhil Vemula,Done,1,2026-05-21,2026-05-21,Database-schema extractor: deterministic SQLAlchemy AST + LLM for Django/Prisma/TypeORM.
+TH-007,Story,Framework detection + 20+ code-extractors,Context: Content Extractor,Discovery & Context,Nikhil Vemula,Done,2,2026-05-22,2026-05-22,Detects the app framework and runs the matching per-language route/handler extractors.
+TH-008,Story,Mock-data + OpenAPI extractors,Context: Content Extractor,Discovery & Context,Nikhil Vemula,Done,2,2026-05-25,2026-05-25,Distils request/response samples and probes/parses the OpenAPI spec.
+TH-009,Story,Text-kg + Jira + Confluence extractors,Context: Content Extractor,Discovery & Context,Nikhil Vemula,Done,2,2026-05-26,2026-05-26,"Extracts knowledge from docs, Jira and Confluence (kg-gen)."
+TH-010,Story,Indexer — 13 topics,Context: Indexer/Scan,Discovery & Context,Nikhil Vemula,Done,2,2026-05-27,2026-05-27,"Merges every source into 13 indexed topic files (APIs, pages, routes, etc.)."
+TH-011,Story,API-spec verifier (authenticity gate),Context: Indexer/Scan,Discovery & Context,Nikhil Vemula,Done,2,2026-05-28,2026-05-28,LLM check that removes phantom/stripped-prefix endpoints and repairs request bodies.
+TH-012,Story,Intelligent login classifier,Crawler,Discovery & Context,Nikhil Vemula,Done,3,2026-05-29,2026-05-29,One LLM classifier for SSO vs normal login with concrete selectors/steps.
+TH-013,Story,Intent-extraction performance tuning,Crawler,Discovery & Context,Nikhil Vemula,Done,3,2026-06-01,2026-06-01,Dedup + concurrency + row caps cut a 34-page crawl from ~81 min to ~30s.
+TH-014,Story,Wire knowledge-file build into the scan,Context: Indexer/Scan,Core Loop,Ankit,Backlog,3,2026-06-01,2026-06-01,Build the file at the end of a scan.
+TH-015,Story,Route-tree wired into the crawler,Crawler,Discovery & Context,Nikhil Vemula,Done,3,2026-06-02,2026-06-02,Route-tree generation added to the crawler pipeline.
+TH-016,Story,Smoke-test the knowledge file,Tests,Core Loop,Ankit,Backlog,3,2026-06-02,2026-06-02,Verify a scan produces a non-empty file.
+TH-017,Story,Graph viewer (interactive HTML),Context: Graph Viewer,Discovery & Context,Nikhil Vemula,Done,3,2026-06-03,2026-06-03,"Self-contained vis-network HTML graphs (click-graph, ui-routes)."
+TH-018,Story,Add provider selection,Infra: Model Connector,Core Loop,Ankit,Backlog,3,2026-06-03,2026-06-03,Register + choose between providers.
+TH-019,Story,API-test generator (verified spec),Generation,Generation,Nikhil Vemula,Done,3,2026-06-04,2026-06-04,Generates curl API tests from the verified spec with session-safety exemptions.
+TH-020,Story,Smoke-test each model provider,Tests,Core Loop,Ankit,Backlog,3,2026-06-04,2026-06-04,Each provider returns a response.
+TH-021,Story,API-test self-repair loop,Generation,Generation,Nikhil Vemula,Done,4,2026-06-05,2026-06-05,"On 422/400, fixes the request body from the server error and re-runs (<=3 attempts)."
+TH-022,Story,Add the run command to the CLI,CLI,Core Loop,Ankit,Backlog,4,2026-06-05,2026-06-05,Expose 'testo run'.
+TH-023,Story,OpenAPI write/mutation test-gen,Generation,Generation,Nikhil Vemula,Done,4,2026-06-08,2026-06-08,Spec-driven write/mutation API tests plus execution.
+TH-024,Story,Agentic harness (LLM tool-calling),Infra: Agentic Harness,Infrastructure,Nikhil Vemula,Done,4,2026-06-09,2026-06-09,"OpenHarness wrapper: LLM tool-calling loop, backend resolver, honesty rule."
+TH-025,Story,Build the results dashboard,Execution,Core Loop,Ankit,Backlog,4,2026-06-08,2026-06-09,Pass/fail/flaky + coverage report.
+TH-026,Story,Skill register,Infra: Skill Register,Infrastructure,Nikhil Vemula,Done,4,2026-06-10,2026-06-10,Catalog + service that runs the project's skills uniformly.
+TH-027,Story,Add the report command to the CLI,CLI,Core Loop,Ankit,Backlog,4,2026-06-10,2026-06-10,Expose 'testo report'.
+TH-028,Story,Model connector (MiniMax),Infra: Model Connector,Infrastructure,Nikhil Vemula,Done,4,2026-06-11,2026-06-11,LLM connector with the MiniMax provider implemented.
+TH-029,Story,Write run results back into the knowledge file,Feedback,Core Loop,Ankit,Backlog,4,2026-06-11,2026-06-11,Record run history (depends A1).
+TH-030,Story,Provenance / confidence schema,Knowledge Base,Knowledge Base,Nikhil Vemula,Done,5,2026-06-12,2026-06-12,Discovery-tier provenance + confidence model used across all sources.
+TH-031,Story,Trigger feedback automatically after a run,Feedback,Core Loop,Ankit,Backlog,5,2026-06-12,2026-06-12,Run write-back when a run finishes.
+TH-032,Story,Add the UI-test generation command,CLI,Core Loop,Ankit,Backlog,5,2026-06-15,2026-06-15,Expose 'testo generate ui-tests'.
+TH-033,Story,Define the knowledge-file structure,Knowledge Base,Core Loop,Nikhil Vemula,Backlog,5,2026-06-16,2026-06-16,Agree facts + source + confidence shape.
+TH-034,Story,Register the UI generator as a skill,Infra: Skill Register,Core Loop,Ankit,Backlog,5,2026-06-16,2026-06-16,Make it discoverable.
+TH-035,Story,Add the plan command to the CLI,CLI,Core Loop,Ankit,Backlog,5,2026-06-17,2026-06-17,Expose 'testo plan'.
+TH-036,Story,Merge indexed outputs into the knowledge file,Knowledge Base,Core Loop,Nikhil Vemula,Backlog,5,2026-06-17,2026-06-18,Combine the 13 topic files into one file.
+TH-037,Story,Add syntax checks for generated tests,Generation,Core Loop,Ankit,Backlog,5,2026-06-18,2026-06-18,Catch broken tests early.
+TH-038,Story,Add knowledge-file read/write helpers,Knowledge Base,Core Loop,Nikhil Vemula,Backlog,6,2026-06-19,2026-06-19,Safe load/save/append helpers.
+TH-039,Story,Run the validator before execution,Generation,Core Loop,Ankit,Backlog,6,2026-06-19,2026-06-19,Block bad tests from the runner.
+TH-040,Story,Add OpenAI model provider,Infra: Model Connector,Core Loop,Nikhil Vemula,Backlog,6,2026-06-22,2026-06-22,Use OpenAI models.
+TH-041,Story,Fold merged records into the knowledge file,Knowledge Base,Context Analytics,Ankit,Backlog,6,2026-06-22,2026-06-22,Write de-duplicated records back.
+TH-042,Story,Add local (Ollama) model provider,Infra: Model Connector,Core Loop,Nikhil Vemula,Backlog,6,2026-06-23,2026-06-23,Local models for offline use.
+TH-043,Story,Add written-doc knowledge to the knowledge file,Knowledge Base,Context Analytics,Ankit,Backlog,6,2026-06-23,2026-06-23,Include docs/Jira/Confluence knowledge.
+TH-044,Story,Add Anthropic model provider,Infra: Model Connector,Core Loop,Nikhil Vemula,Backlog,6,2026-06-24,2026-06-24,Use Anthropic models.
+TH-045,Story,Run analytics as part of a scan,Context: Indexer/Scan,Context Analytics,Ankit,Backlog,6,2026-06-24,2026-06-24,Wire analytics into the scan.
+TH-046,Story,Run feature grouping in the scan,Context: Indexer/Scan,Context Analytics,Ankit,Backlog,6,2026-06-25,2026-06-25,Wire feature grouping in.
+TH-047,Story,Run the generated UI tests + emit JSON,Execution,Core Loop,Nikhil Vemula,Backlog,6,2026-06-25,2026-06-26,Execute Playwright specs with machine-readable output.
+TH-048,Story,Run gap analysis in the scan,Context: Indexer/Scan,Context Analytics,Ankit,Backlog,7,2026-06-26,2026-06-26,Wire gap analysis in.
+TH-049,Story,Export an explorable app map,Context: Graph Analytics,Context Analytics,Ankit,Backlog,7,2026-06-29,2026-06-29,Map for Gephi etc.
+TH-050,Story,Run the generated API tests in the runner,Execution,Core Loop,Nikhil Vemula,Backlog,7,2026-06-29,2026-06-30,Execute the API tests from the runner.
+TH-051,Story,Export a scenario tree diagram,Context: Graph Analytics,Context Analytics,Ankit,Backlog,7,2026-06-30,2026-06-30,Readable scenario tree.
+TH-052,Story,Define one unified results format,Execution,Core Loop,Nikhil Vemula,Backlog,7,2026-07-01,2026-07-01,Normalise API + UI outcomes into one file.
+TH-053,Story,Run map building in the scan,Context: Indexer/Scan,Context Analytics,Ankit,Backlog,7,2026-07-01,2026-07-01,Wire map building in.
+TH-054,Story,Add retry-once and flaky detection,Execution,Core Loop,Nikhil Vemula,Backlog,7,2026-07-02,2026-07-02,"Re-run failures once, label flaky."
+TH-055,Story,Inject relevant notes into runs,Memory,Learning & Resilience,Ankit,Backlog,7,2026-07-02,2026-07-02,Feed notes into generation/execution.
+TH-056,Story,Consolidate + prune notes,Memory,Learning & Resilience,Ankit,Backlog,8,2026-07-03,2026-07-03,"Merge duplicates, remove stale."
+TH-057,Story,Build the test-plan creator,Generation,Core Loop,Nikhil Vemula,Backlog,8,2026-07-03,2026-07-06,Decide scope + priority of what to test.
+TH-058,Story,Record heal events into memory,Execution,Learning & Resilience,Ankit,Backlog,8,2026-07-06,2026-07-06,Feed heal events into per-app memory.
+TH-059,Story,Derive UI scenarios from user flows,Generation,Core Loop,Nikhil Vemula,Backlog,8,2026-07-07,2026-07-07,Turn click-flows into scenarios.
+TH-060,Story,Add compose + run scripts,Infra: Deploy,Deployment & Scale,Ankit,Backlog,8,2026-07-07,2026-07-07,Easy container startup.
+TH-061,Story,Add quality + coverage checks,Generation,Core Loop,Nikhil Vemula,Backlog,8,2026-07-08,2026-07-08,Flag low-quality/low-coverage tests.
+TH-062,Story,Add optional AI quality-judge gate,Generation,Core Loop,Nikhil Vemula,Backlog,8,2026-07-09,2026-07-09,Optional AI review.
+TH-063,Story,Add a CI pipeline,Infra: Deploy,Deployment & Scale,Ankit,Backlog,8,2026-07-08,2026-07-09,Build/test on each change.
+TH-064,Story,De-duplicate findings across sources,Context: Graph Analytics,Context Analytics,Nikhil Vemula,Backlog,9,2026-07-10,2026-07-13,Match same endpoint/page across scans.
+TH-065,Story,Build self-service intake (URL + creds),CLI,Deployment & Scale,Ankit,Backlog,9,2026-07-10,2026-07-13,Submit an app to start a run.
+TH-066,Story,Set up the analytics dependencies,Context: Graph Analytics,Context Analytics,Nikhil Vemula,Backlog,9,2026-07-14,2026-07-14,Add graph-analytics libraries.
+TH-067,Story,Bundle the graph viewer UI library locally,Context: Graph Viewer,Deployment & Scale,Ankit,Backlog,9,2026-07-14,2026-07-14,Graphs render offline.
+TH-068,Story,Load the app graph into the analytics engine,Context: Graph Analytics,Context Analytics,Nikhil Vemula,Backlog,9,2026-07-15,2026-07-15,Read the captured graph.
+TH-069,Story,Make browser install work offline,Crawler,Deployment & Scale,Ankit,Backlog,9,2026-07-15,2026-07-15,Pre-bundle the browser.
+TH-070,Story,Point installs at internal mirrors,Infra: Deploy,Deployment & Scale,Ankit,Backlog,9,2026-07-16,2026-07-16,Install deps from mirrors.
+TH-071,Story,Score importance + detect communities,Context: Graph Analytics,Context Analytics,Nikhil Vemula,Backlog,9,2026-07-16,2026-07-17,"Rank important areas, cluster the app."
+TH-072,Story,Default to a local model in restricted mode,Infra: Model Connector,Deployment & Scale,Ankit,Backlog,10,2026-07-17,2026-07-17,Use local model when offline.
+TH-073,Story,Handle corporate certificate trust,Infra: Deploy,Deployment & Scale,Ankit,Backlog,10,2026-07-20,2026-07-20,Trust internal certificates.
+TH-074,Story,Group the app into named features,Context: Graph Analytics,Context Analytics,Nikhil Vemula,Backlog,10,2026-07-20,2026-07-21,Turn clusters into features.
+TH-075,Story,Fold the knowledge-sources folder into docs,Docs,Cleanup & Tests,Ankit,Backlog,10,2026-07-21,2026-07-21,Tidy the outdated placeholder.
+TH-076,Story,Remove the duplicate UI generator,Generation,Cleanup & Tests,Ankit,Backlog,10,2026-07-22,2026-07-22,Keep one source of truth.
+TH-077,Story,Find coverage gaps + untested areas,Context: Graph Analytics,Context Analytics,Nikhil Vemula,Backlog,10,2026-07-22,2026-07-23,Compare existing vs tested.
+TH-078,Story,Resolve the mock-data placeholder,Generation,Cleanup & Tests,Ankit,Backlog,10,2026-07-23,2026-07-23,Build or remove it.
+TH-079,Story,Define the per-app memory format,Memory,Learning & Resilience,Nikhil Vemula,Backlog,11,2026-07-24,2026-07-24,How learned knowledge is stored.
+TH-080,Story,Add tests for the extractors,Tests,Cleanup & Tests,Ankit,Backlog,11,2026-07-24,2026-07-27,Unit/smoke tests for extractors.
+TH-081,Story,Build the memory distiller core,Memory,Learning & Resilience,Nikhil Vemula,Backlog,11,2026-07-27,2026-07-28,Turn run outcomes into notes.
+TH-082,Story,Add tests for indexer + knowledge file,Tests,Cleanup & Tests,Ankit,Backlog,11,2026-07-28,2026-07-28,Tests for indexing + KB.
+TH-083,Story,Add tests for the test runner,Tests,Cleanup & Tests,Ankit,Backlog,11,2026-07-29,2026-07-29,Tests for the runner.
+TH-084,Story,Add distiller routing + storage,Memory,Learning & Resilience,Nikhil Vemula,Backlog,11,2026-07-29,2026-07-30,Route notes to the right files.
+TH-085,Story,Improve the safe-click crawling pass,Crawler,Cleanup & Tests,Ankit,Backlog,11,2026-07-30,2026-07-30,Refine which buttons are clicked.
+TH-086,Story,Update the architecture overview,Docs,Deployment & Scale,Ankit,Backlog,12,2026-07-31,2026-07-31,Refresh the architecture doc.
+TH-087,Story,Add recall tools to fetch notes,Infra: Agentic Harness,Learning & Resilience,Nikhil Vemula,Backlog,12,2026-07-31,2026-08-03,Look up relevant notes.
+TH-088,Story,Document the knowledge base + schema,Docs,Deployment & Scale,Ankit,Backlog,12,2026-08-03,2026-08-03,How the knowledge file works.
+TH-089,Story,Write the CLI command reference,Docs,Deployment & Scale,Ankit,Backlog,12,2026-08-04,2026-08-04,scan/generate/run/report/plan.
+TH-090,Story,Build self-healing locator fallbacks,Execution,Learning & Resilience,Nikhil Vemula,Backlog,12,2026-08-04,2026-08-05,Deterministic alternates first.
+TH-091,Story,Document execution + reporting,Docs,Deployment & Scale,Ankit,Backlog,12,2026-08-05,2026-08-05,How runs + reports work.
+TH-092,Story,Document the analytics module,Docs,Deployment & Scale,Ankit,Backlog,12,2026-08-06,2026-08-06,Importance/features/gaps.
+TH-093,Story,Add AI-assisted locator resolve,Execution,Learning & Resilience,Nikhil Vemula,Backlog,12,2026-08-06,2026-08-07,AI suggests an alternate when an element moves.
+TH-094,Story,Document the memory module,Docs,Deployment & Scale,Ankit,Backlog,13,2026-08-07,2026-08-07,Per-app skill memory.
+TH-095,Story,Document self-healing execution,Docs,Deployment & Scale,Ankit,Backlog,13,2026-08-10,2026-08-10,How healing works + limits.
+TH-096,Story,Capture the page state for healing,Execution,Learning & Resilience,Nikhil Vemula,Backlog,13,2026-08-10,2026-08-11,Snapshot roles/labels/text.
+TH-097,Story,Write the onboarding guide (add an app),Docs,Deployment & Scale,Ankit,Backlog,13,2026-08-11,2026-08-12,How a tester onboards a new app.
+TH-098,Story,Add heal cache + retry logic,Execution,Learning & Resilience,Nikhil Vemula,Backlog,13,2026-08-12,2026-08-13,Remember a successful fix.
+TH-099,Story,Document the test strategy + 3 gates,Docs,Deployment & Scale,Ankit,Backlog,13,2026-08-13,2026-08-13,Authenticity/session-safety/self-repair.
+TH-100,Story,Add sandboxed setup/teardown hooks,Execution,Learning & Resilience,Nikhil Vemula,Backlog,14,2026-08-14,2026-08-17,Run hooks in an isolated container.
+TH-101,Story,Build the container image,Infra: Deploy,Deployment & Scale,Nikhil Vemula,Backlog,14,2026-08-18,2026-08-19,Worker image for the tool.
+TH-102,Story,Bug-fix & stabilization buffer 2,Generation,Stabilization & Release,Ankit,Backlog,14,2026-08-14,2026-08-20,Stabilization / UAT / release.
+TH-103,Story,Make outputs per-app (no collisions),Context: Indexer/Scan,Deployment & Scale,Nikhil Vemula,Backlog,14,2026-08-20,2026-08-21,Parallel apps without overwriting.
+TH-104,Story,Add a job queue + workers,Infra: Deploy,Deployment & Scale,Nikhil Vemula,Backlog,15,2026-08-24,2026-08-25,Process many runs in parallel.
+TH-105,Story,Add proxy support to crawler + browser,Crawler,Deployment & Scale,Nikhil Vemula,Backlog,15,2026-08-26,2026-08-26,Reach targets via corporate proxy.
+TH-106,Story,Add AI button classification for crawling,Crawler,Cleanup & Tests,Nikhil Vemula,Backlog,15,2026-08-27,2026-08-28,Classify safe/unsafe buttons.
+TH-107,Story,UAT support & feedback fixes,Execution,Stabilization & Release,Ankit,Backlog,15,2026-08-21,2026-08-28,Stabilization / UAT / release.
+TH-108,Story,Write the restricted/offline deploy guide,Docs,Deployment & Scale,Nikhil Vemula,Backlog,16,2026-08-31,2026-09-01,"Mirrors, local models, offline."
+TH-109,Story,Write the egress / NetSec proposal,Docs,Deployment & Scale,Nikhil Vemula,Backlog,16,2026-09-02,2026-09-02,Allow-list + approval process.
+TH-110,Story,Build the KT / handover pack,Docs,Deployment & Scale,Nikhil Vemula,Backlog,16,2026-09-03,2026-09-04,Knowledge transfer + handover.
+TH-111,Story,Regression suite + smoke pack,Tests,Stabilization & Release,Ankit,Backlog,16,2026-08-31,2026-09-04,Stabilization / UAT / release.
+TH-112,Story,Integration test pass (end-to-end),Execution,Stabilization & Release,Nikhil Vemula,Backlog,17,2026-09-07,2026-09-11,Stabilization / UAT / release.
+TH-113,Story,Documentation & KT polish,Docs,Stabilization & Release,Ankit,Backlog,17,2026-09-07,2026-09-11,Stabilization / UAT / release.
+TH-114,Story,Bug-fix & stabilization buffer 1,Generation,Stabilization & Release,Nikhil Vemula,Backlog,18,2026-09-14,2026-09-18,Stabilization / UAT / release.
+TH-115,Story,Performance & load hardening,Execution,Stabilization & Release,Nikhil Vemula,Backlog,19,2026-09-21,2026-09-24,Stabilization / UAT / release.
+TH-116,Story,Security review & remediation,Infra: Deploy,Stabilization & Release,Nikhil Vemula,Backlog,20,2026-09-25,2026-09-30,Stabilization / UAT / release.
+TH-117,Story,Scaffold the web dashboard,CLI,Deployment & Scale,Ankit,Deferred (post Sep 30),20,2026-10-01,2026-10-02,Initial web UI (deferred).
+TH-118,Story,Design a database-backed knowledge store,Infra: DB,Deployment & Scale,Nikhil Vemula,Deferred (post Sep 30),20,2026-10-01,2026-10-02,Plan the DB schema (optional).
+TH-119,Story,Production cutover + handover sign-off,Infra: Deploy,Stabilization & Release,Nikhil Vemula,Backlog,20,2026-10-01,2026-10-06,Stabilization / UAT / release.
+TH-120,Story,Build the web results view,CLI,Deployment & Scale,Ankit,Deferred (post Sep 30),21,2026-10-05,2026-10-06,Browse results in the UI (deferred).
+TH-121,Story,Implement the database store,Infra: DB,Deployment & Scale,Nikhil Vemula,Deferred (post Sep 30),21,2026-10-05,2026-10-06,Replace file store with DB (optional).
+TH-122,Story,Backlog grooming + estimation (ongoing),Project Mgmt,Project Management,Nikhil Kalsi,Backlog,1,2026-05-15,2026-10-07,Recurring refinement.
+TH-123,Story,Sprint demos + stakeholder reporting,Project Mgmt,Project Management,Nikhil Kalsi,Backlog,1,2026-05-15,2026-10-07,Bi-weekly demos + status.
+TH-124,Story,Track risks + external dependencies,Project Mgmt,Project Management,Nikhil Kalsi,Backlog,1,2026-05-15,2026-10-07,"NetSec, specs, test accounts."
+TH-125,Story,Release + UAT coordination,Project Mgmt,Project Management,Nikhil Kalsi,Backlog,19,2026-09-21,2026-10-07,Final release + handover.

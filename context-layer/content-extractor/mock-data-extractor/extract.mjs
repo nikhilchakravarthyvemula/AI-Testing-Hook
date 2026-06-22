@@ -10,6 +10,11 @@
 //     observed response shape, masking PII in samples, etc.) plug in
 //     here without touching the crawler.
 //
+// NOTE: an EMPTY bundle just means the crawl observed no API traffic with
+// bodies (data-dependent, not a bug). The `api-spec` indexer topic falls
+// back to the crawler-inferred OpenAPI in that case, so a per-endpoint
+// test contract still exists.
+//
 // Output shape (kept flat + per-endpoint so it's trivially consumable):
 //
 //   output/mock-data/bundle.json

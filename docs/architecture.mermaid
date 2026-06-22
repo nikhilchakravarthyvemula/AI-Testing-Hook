@@ -1,0 +1,59 @@
+flowchart LR
+  %% ── inputs ─────────────────────────────────
+  subgraph IN["inputs"]
+    direction TB
+    cb["codebase"]
+    ll["live link"]
+    oa["openapi"]
+    jc["jira / confluence"]
+    td["tribal docs"]
+  end
+
+  %% ── orchestrator (testo) ───────────────────
+  subgraph ORCH["orchestrator · testo"]
+    direction LR
+
+    subgraph SC["scanner"]
+      direction TB
+      crawler["crawler"]
+      graphify["graphify"]
+      codeext["code-extractors"]
+      indexer["indexer"]
+      verifier["verifier"]
+    end
+
+    KB[("knowledge base")]
+
+    subgraph GEN["generator"]
+      direction TB
+      api["api tests"]
+      oapi["openapi tests"]
+      ui["ui tests"]
+      tp["test plan"]
+      md["mock data"]
+      val["validator"]
+    end
+
+    subgraph EX["executor"]
+      direction TB
+      te["test executor"]
+      rg["report generator"]
+      fb["feedback"]
+    end
+
+    SC --> KB --> GEN --> EX
+  end
+
+  %% ── infrastructure (cross-cutting) ─────────
+  subgraph INFRA["infrastructure · cross-cutting"]
+    direction LR
+    llm["LLM connector"]
+    ah["agentic harness"]
+    sr["skill register"]
+    dd["datastore / deploy"]
+  end
+
+  %% ── flow ───────────────────────────────────
+  IN --> SC
+  EX -. feedback .-> KB
+  ORCH -.- INFRA

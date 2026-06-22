@@ -1,3 +1,6 @@
 pydantic>=2.7,<3
 pyyaml>=6.0,<7
 rich>=13.0,<14
+# doc/text knowledge extraction (text-kg, jira, confluence sources)
+pypdf>=4.0            # PDF text extraction (best-effort)
+kg-gen               # optional: DSPy+LiteLLM triple extraction; HTTP fallback used if absent

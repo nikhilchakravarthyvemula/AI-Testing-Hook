@@ -8,10 +8,12 @@
 //   * sources.codeExtractors[*].endpoints[]    backend-declared APIs (python-fastapi, etc.)
 //   * sources.codeExtractors[*].routes[]       frontend-declared routes (nextjs-app, react-router, etc.)
 //
-// Output shape — five node types, six edge kinds:
-//   nodes: { pages, routes, intents, forms, apis }
-//   edges with `relation` ∈ { contains, contains-form, triggers,
-//                             navigates_to, invokes, submits_to, realizes }
+// Output shape — seven node types, nine edge kinds:
+//   nodes: { pages, routes, intents, forms, apis, states, controls }
+//     state   = in-page change (modal/dropdown/tab) the walker observed
+//     control = editable input / select / toggle / expander (with selector)
+//   edges with `relation` ∈ { contains, contains-form, has-control, triggers,
+//                             navigates_to, state, invokes, submits_to, realizes }
 //
 // Dedup rules:
 //   * page    keyed by absolute URL (pathname+search collapsed, host preserved)
@@ -38,25 +40,30 @@ export function build(sources) {
   _addDeclaredRoutes(ctx, sources);
   _addAllApis(ctx, sources);
   _absorbClickablesAndForms(ctx, sources);
+  _absorbInteractables(ctx, sources);
   _addLiveTriggeredApiEdges(ctx, sources);
   _addLiveClickGraphEdges(ctx, sources);
 
   const graph = {
     nodes: {
-      pages:   [...ctx.pages.values()],
-      routes:  [...ctx.routes.values()],
-      intents: [...ctx.intents.values()].sort((a, b) => b.occurrenceCount - a.occurrenceCount),
-      forms:   [...ctx.forms.values()],
-      apis:    [...ctx.apis.values()],
+      pages:    [...ctx.pages.values()],
+      routes:   [...ctx.routes.values()],
+      intents:  [...ctx.intents.values()].sort((a, b) => b.occurrenceCount - a.occurrenceCount),
+      forms:    [...ctx.forms.values()],
+      apis:     [...ctx.apis.values()],
+      states:   [...ctx.states.values()],
+      controls: [...ctx.controls.values()],
     },
     edges: ctx.edges,
     summary: {
-      pages:   ctx.pages.size,
-      routes:  ctx.routes.size,
-      intents: ctx.intents.size,
-      forms:   ctx.forms.size,
-      apis:    ctx.apis.size,
-      edges:   ctx.edges.length,
+      pages:    ctx.pages.size,
+      routes:   ctx.routes.size,
+      intents:  ctx.intents.size,
+      forms:    ctx.forms.size,
+      apis:     ctx.apis.size,
+      states:   ctx.states.size,
+      controls: ctx.controls.size,
+      edges:    ctx.edges.length,
       visitedPages:    [...ctx.pages.values()].filter(p =>  p.visited).length,
       unvisitedPages:  [...ctx.pages.values()].filter(p => !p.visited).length,
       apisWithCallers: [...ctx.apis.values()].filter(a => a.callerCount > 0).length,
@@ -87,12 +94,14 @@ export function build(sources) {
 
 function _makeCtx(sources) {
   return {
-    pages:   new Map(),   // key=absolute URL → page node
-    routes:  new Map(),   // key=`${framework}:${pattern}` → route node
-    intents: new Map(),   // key=`${category}:${intent}` → intent node
-    forms:   new Map(),   // key=`${pageUrl}#form-${idx}` → form node
-    apis:    new Map(),   // key=`${METHOD}:${path}` → api node
-    edges:   [],
+    pages:    new Map(),   // key=absolute URL → page node
+    routes:   new Map(),   // key=`${framework}:${pattern}` → route node
+    intents:  new Map(),   // key=`${category}:${intent}` → intent node
+    forms:    new Map(),   // key=`${pageUrl}#form-${idx}` → form node
+    apis:     new Map(),   // key=`${METHOD}:${path}` → api node
+    states:   new Map(),   // key=`state:${url}#${key}` → state-change node (modal/dropdown/tab)
+    controls: new Map(),   // key=`control:${url}#${sel}` → edit/toggle/expand interactable
+    edges:    [],
 
     // Base URL for resolving relative destination paths to absolute URLs.
     // Falls back to the first crawled page's origin if no target is set.
@@ -335,19 +344,90 @@ function _parseTriggeredApi(entry) {
 
 
 function _addLiveClickGraphEdges(ctx, sources) {
-  // The crawler optionally writes a page→page transition graph from its
-  // interactive BFS (interact_pages env). If present, mirror those edges
-  // into the click-graph so direct navigations show up even without an
-  // LLM intent annotation.
+  // The walker records every interaction as an edge:
+  //   { from, to, button, key, hadNav, kind: 'nav' | 'state', ... }
+  // NAV edges are page→page transitions (`to` is a URL). STATE edges are
+  // in-page changes — modal/dropdown/tab opens — where `to` is `url#key`
+  // (NOT a real page). We must branch: nav → navigates_to (page→page),
+  // state → a dedicated state node + a `state` edge. Treating state edges
+  // as navigations (the old behaviour) fabricated bogus `url#sel:…` pages.
   const edges = sources.crawler?.facts?.clickGraph?.edges ?? [];
   for (const e of edges) {
     const from = _absoluteUrl(e.from ?? e.fromUrl, ctx.baseUrl);
-    const to   = _absoluteUrl(e.to   ?? e.toUrl,   ctx.baseUrl);
-    if (!from || !to) continue;
+    if (!from) continue;
     const fromId = _ensurePage(ctx, from, { visited: true });
-    const toId   = _ensurePage(ctx, to,   { visited: false });
-    ctx.edges.push({ from: fromId, to: toId, relation: 'navigates_to', via: 'click' });
+    const isNav = e.kind ? e.kind === 'nav' : e.hadNav === true;
+
+    if (isNav) {
+      const to = _absoluteUrl(e.to ?? e.toUrl, ctx.baseUrl);
+      if (!to) continue;
+      const toId = _ensurePage(ctx, to, { visited: false });
+      ctx.edges.push({
+        from: fromId, to: toId, relation: 'navigates_to', via: 'click',
+        label: e.button ?? null, selector: _selectorOf(e.key),
+      });
+    } else {
+      // In-page state change → state node keyed by the raw `to` (`url#key`).
+      const rawTo = e.to ?? e.toUrl;
+      if (!rawTo) continue;
+      const stateId = `state:${rawTo}`;
+      if (!ctx.states.has(stateId)) {
+        ctx.states.set(stateId, {
+          id: stateId,
+          page: from,
+          label: e.button || '(state change)',
+          key: e.key ?? null,
+          selector: _selectorOf(e.key),
+          triggeredBy: e.originalKind ?? 'click',
+        });
+      }
+      ctx.edges.push({
+        from: fromId, to: stateId, relation: 'state', via: 'click',
+        label: e.button ?? null, selector: _selectorOf(e.key),
+      });
+    }
   }
+}
+
+
+function _absorbInteractables(ctx, sources) {
+  // Editable inputs / selects / toggles / expanders the walker recorded per
+  // page (`facts.clickGraph.interactables = { url: [items] }`). Each item is
+  // `{ kind: 'edit'|'toggle'|'expand', tag, role, label, name, placeholder,
+  //    inputType, testid, idAttr, selector }`. These are the form-field /
+  // control selectors a test generator needs but that aren't nav/click — so
+  // we surface them as `control` nodes with a `has-control` edge from the page.
+  const byUrl = sources.crawler?.facts?.clickGraph?.interactables ?? {};
+  for (const [rawUrl, items] of Object.entries(byUrl)) {
+    const pageUrl = _absoluteUrl(rawUrl, ctx.baseUrl);
+    if (!pageUrl || !Array.isArray(items)) continue;
+    const pageId = _ensurePage(ctx, pageUrl, { visited: true });
+    items.forEach((it, idx) => {
+      const sel = it.selector || it.testid || it.idAttr || it.label || `idx-${idx}`;
+      const id = `control:${pageUrl}#${sel}`;
+      if (ctx.controls.has(id)) return;
+      ctx.controls.set(id, {
+        id,
+        page: pageUrl,
+        controlKind: it.kind ?? 'edit',       // edit | toggle | expand
+        tag: it.tag ?? null,
+        role: it.role ?? null,
+        label: it.label ?? it.name ?? it.placeholder ?? null,
+        name: it.name ?? null,
+        inputType: it.inputType ?? null,
+        selector: it.selector ?? null,
+      });
+      ctx.edges.push({ from: pageId, to: id, relation: 'has-control', via: it.kind ?? 'edit' });
+    });
+  }
+}
+
+
+// Pull the raw CSS selector out of a walker stable-key (`sel:<css>`); other
+// key kinds (`id:`, `testid:`, `href:`, `label:`) aren't CSS selectors.
+function _selectorOf(key) {
+  if (typeof key !== 'string') return null;
+  return key.startsWith('sel:') ? key.slice(4) : null;
 }
 
 

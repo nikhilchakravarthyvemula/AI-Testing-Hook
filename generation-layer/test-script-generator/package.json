@@ -1,0 +1,11 @@
+{
+  "name": "test-script-generator",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "Generates runnable Playwright UI test scripts from the crawler's routes/pages/click-graph. Re-homed from scripts/crawler/generator/.",
+  "scripts": {
+    "generate": "node generator.mjs",
+    "e2e-gen": "node e2e.mjs"
+  }
+}

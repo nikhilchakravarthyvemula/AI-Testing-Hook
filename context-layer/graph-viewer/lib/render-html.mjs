@@ -64,7 +64,11 @@ function renderHtml({ nodes, edges, meta }) {
     aside h2 { font-size: 14px; margin: 16px 0 6px 0; color: #9aa1a8; text-transform: uppercase; letter-spacing: 0.5px; }
     aside h2:first-child { margin-top: 0; }
     .legend-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
-    .legend-swatch { width: 12px; height: 12px; border-radius: 3px; }
+    .legend-swatch { width: 12px; height: 12px; border-radius: 3px; flex: none; }
+    .legend-sym { width: 14px; text-align: center; color: #cfd3d8; flex: none; }
+    .filter-row { display: flex; align-items: center; gap: 6px; margin: 3px 0; cursor: pointer; user-select: none; }
+    .filter-row input { cursor: pointer; }
+    .filter-row .cnt { color: #6b7178; font-variant-numeric: tabular-nums; margin-left: auto; }
     .stats { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; }
     .stats .v { font-variant-numeric: tabular-nums; }
     #selection { background: #1c1f23; border-radius: 6px; padding: 10px; min-height: 60px; word-break: break-word; }
@@ -84,6 +88,8 @@ function renderHtml({ nodes, edges, meta }) {
   </header>
   <div id="graph"></div>
   <aside>
+    <h2>Filters</h2>
+    <div id="typeFilters"></div>
     <h2>Legend</h2>
     <div id="legend"></div>
     <h2>Stats</h2>
@@ -113,7 +119,9 @@ function renderHtml({ nodes, edges, meta }) {
     for (const item of (meta.legend || [])) {
       const row = document.createElement('div');
       row.className = 'legend-row';
-      row.innerHTML = '<span class="legend-swatch" style="background:' + item.color + '"></span>' + escapeText(item.label);
+      row.innerHTML = '<span class="legend-swatch" style="background:' + item.color + '"></span>'
+        + '<span class="legend-sym">' + escapeText(item.symbol || '') + '</span>'
+        + escapeText(item.label);
       legendEl.appendChild(row);
     }
 
@@ -185,19 +193,79 @@ function renderHtml({ nodes, edges, meta }) {
     }
     console.log('[click-graph] rendered', nodes.length, 'nodes /', edges.length, 'edges');
 
-    // Search filter — hides non-matching nodes (and their connected edges by default)
-    document.getElementById('search').addEventListener('input', (e) => {
-      const q = e.target.value.trim().toLowerCase();
-      const keep = new Set();
-      for (const n of nodes) {
-        const hay = (n.label + ' ' + (n.title || '')).toLowerCase();
-        if (!q || hay.includes(q)) keep.add(n.id);
+    // ── Per-type filter toggles + search (combined) ───────────────────────
+    // A node is shown when its _kind is enabled AND it matches the search.
+    // Build one checkbox per distinct entity kind present in the graph.
+    const KIND_META = {
+      page:    { label: 'Pages',    color: '#4682b4' },
+      route:   { label: 'Routes',   color: '#7b68ee' },
+      intent:  { label: 'Intents',  color: '#3cb371' },
+      form:    { label: 'Forms',    color: '#ffd964' },
+      api:     { label: 'APIs',     color: '#f0ad4e' },
+      state:   { label: 'States',   color: '#20b2aa' },
+      control: { label: 'Controls', color: '#e26fce' },
+    };
+    const kindCounts = {};
+    for (const n of nodes) kindCounts[n._kind] = (kindCounts[n._kind] || 0) + 1;
+    const activeKinds = new Set(Object.keys(kindCounts));
+    const filtersEl = document.getElementById('typeFilters');
+    for (const kind of Object.keys(KIND_META)) {
+      if (!kindCounts[kind]) continue;
+      const meta2 = KIND_META[kind];
+      const row = document.createElement('label');
+      row.className = 'filter-row';
+      row.innerHTML = '<input type="checkbox" checked data-kind="' + kind + '">'
+        + '<span class="legend-swatch" style="background:' + meta2.color + '"></span>'
+        + escapeText(meta2.label)
+        + '<span class="cnt">' + kindCounts[kind] + '</span>';
+      row.querySelector('input').addEventListener('change', (ev) => {
+        if (ev.target.checked) activeKinds.add(kind); else activeKinds.delete(kind);
+        applyFilters();
+      });
+      filtersEl.appendChild(row);
+    }
+
+    // Adjacency (vis numeric ids) for neighbour-isolation on node click.
+    const adj = new Map();
+    const edgeId = (e) => e.id ?? \`\${e.from}->\${e.to}-\${e.label || ''}\`;
+    for (const e of edges) {
+      if (!adj.has(e.from)) adj.set(e.from, new Set());
+      if (!adj.has(e.to))   adj.set(e.to, new Set());
+      adj.get(e.from).add(e.to);
+      adj.get(e.to).add(e.from);
+    }
+    // When a node is focused (clicked), the graph collapses to that node + its
+    // direct neighbours and the edges between them. Click empty space to clear.
+    let focusedId = null;
+
+    function applyFilters() {
+      const q = (document.getElementById('search').value || '').trim().toLowerCase();
+      let keep, edgeVisible;
+      if (focusedId != null) {
+        // Focus view: show the clicked node + everything it connects to,
+        // overriding type/search filters so no connection is hidden.
+        keep = new Set([focusedId, ...(adj.get(focusedId) || [])]);
+        edgeVisible = (e) => e.from === focusedId || e.to === focusedId;
+      } else {
+        keep = new Set();
+        for (const n of nodes) {
+          if (!activeKinds.has(n._kind)) continue;
+          const hay = (n.label + ' ' + (n._raw ? JSON.stringify(n._raw) : '')).toLowerCase();
+          if (!q || hay.includes(q)) keep.add(n.id);
+        }
+        edgeVisible = (e) => keep.has(e.from) && keep.has(e.to);
       }
-      nodesDs.update(nodes.map(n => ({ id: n.id, hidden: keep.size > 0 && !keep.has(n.id) })));
-      edgesDs.update(edges.map(e => ({
-        id: e.id ?? \`\${e.from}->\${e.to}-\${e.label || ''}\`,
-        hidden: keep.size > 0 && !(keep.has(e.from) && keep.has(e.to)),
-      })));
+      nodesDs.update(nodes.map(n => ({ id: n.id, hidden: !keep.has(n.id) })));
+      edgesDs.update(edges.map(e => ({ id: edgeId(e), hidden: !edgeVisible(e) })));
+    }
+    document.getElementById('search').addEventListener('input', applyFilters);
+
+    // Click a node → isolate it + its neighbours; click empty canvas → restore.
+    network.on('click', (params) => {
+      const next = (params.nodes && params.nodes.length) ? params.nodes[0] : null;
+      if (next === focusedId) return;     // no change (re-click same node)
+      focusedId = next;
+      applyFilters();
     });
 
     // Pause/resume physics

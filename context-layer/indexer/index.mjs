@@ -35,6 +35,8 @@ import { build as buildClickGraph }   from './topics/click-graph.mjs';
 import { build as buildDbSchema }     from './topics/db-schema.mjs';
 import { build as buildMockData }     from './topics/mock-data.mjs';
 import { build as buildOpenApi }      from './topics/openapi.mjs';
+import { build as buildApiSpec }      from './topics/api-spec.mjs';
+import { verifyApiSpec }              from './verify/api-spec-verify.mjs';
 
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -57,12 +59,13 @@ const TOPIC_REGISTRY = [
   { name: 'db-schema',    build: buildDbSchema,     description: 'SQLAlchemy tables: columns, constraints, foreign keys, relationships' },
   { name: 'mock-data',    build: buildMockData,     description: 'Real request + response samples per endpoint, observed by the crawler' },
   { name: 'openapi',      build: buildOpenApi,      description: 'Live-served OpenAPI/Swagger spec per endpoint (resolved schemas)' },
+  { name: 'api-spec',     build: buildApiSpec,      description: 'Per-endpoint test contract: headers + request body + expected responses (crawler-OpenAPI ∪ mock-data ∪ crawler)' },
 ];
 
 
 // ── runner ────────────────────────────────────────────────────────────────
 
-function main() {
+async function main() {
   fs.mkdirSync(OUT_DIR, { recursive: true });
 
   console.log('[indexer] loading source bundles from output/…');
@@ -120,6 +123,16 @@ function main() {
     `[indexer] total items: ${Object.values(summary.topics)
       .reduce((acc, t) => acc + (t.count || 0), 0)}`,
   );
+
+  // Post-pass: LLM-assisted authenticity check + body repair on the api-spec
+  // contract (removes phantom duplicates, fills request-body gaps). Rewrites
+  // api-spec.json in place. Non-fatal — a failure leaves the raw topic intact.
+  try {
+    console.log('\n[indexer] verifying api-spec (authenticity + bodies)…');
+    await verifyApiSpec();
+  } catch (e) {
+    console.warn(`[indexer] api-spec verification skipped: ${e.message}`);
+  }
 }
 
 
@@ -151,4 +164,4 @@ function _sourcesContributing(items) {
 }
 
 
-main();
+main().catch(e => { console.error(`[indexer] failed: ${e.message}`); process.exit(1); });

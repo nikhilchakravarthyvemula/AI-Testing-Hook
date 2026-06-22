@@ -1,0 +1,98 @@
+---
+title: Process Flow (future state) — existing pipeline + Modules 1/2/3 (new work highlighted)
+---
+flowchart TD
+    Start(["User runs testo CLI"]) --> Disp{"testo subcommand?"}
+    Disp -->|scan| S0
+    Disp -->|generate| G0
+    Disp -->|run NEW| R0
+    Disp -->|learn NEW| L0
+    Disp -->|ask| A0
+    Leg["NEW work is colored — blue: Module 1 KG analytics · green: Module 2 memory · purple: shared store<br/>yellow: Module 3 execution · red: self-healing · teal: LLM seam · gray: existing/as-built"]
+
+    %% ===================== SCAN + MODULE 1 =====================
+    subgraph SCAN["testo scan  +  Module 1 (Context Layer / KG analytics)"]
+    direction TB
+        S0["scan.mjs (STAGES)"] --> RUN["content-extractor/run.mjs"]
+        RUN --> EXIST_EXTR["existing extractors<br/>crawler · graphify · db-schema · mock-data · openapi · code-extractors"]
+        RUN --> TKG["text-kg/extract.py<br/>kg-gen generate() · cluster()"]
+        EXIST_EXTR --> IDX["indexer/index.mjs<br/>12 topics"]
+        TKG --> IDX
+        IDX --> IDXO[/"indexed_output/*.json (incl. click-graph.json)"/]
+        IDXO --> ANALYZE["graph-analytics/analyze.py<br/>pagerank · betweenness · louvain"]
+        ANALYZE --> FEAT["feature-extractor<br/>communities to features.json"]
+        FEAT --> GAP["gap-analyzer<br/>diffs to gaps.json"]
+        GAP --> MIND["mind-map-builder<br/>GraphML · Mermaid"]
+        MIND --> VIEW["graph-viewer<br/>enhanced: size=PageRank, color=community"]
+        ANALYZE --> VIEW
+        ANALYZE --> ART1[/"graph-analytics.json · features.json · gaps.json"/]
+    end
+
+    %% ===================== GENERATE (+ priority feed) =====================
+    subgraph GENF["testo generate  (+ risk-based priority)"]
+    direction TB
+        PRIO{"priority from<br/>graph-analytics?"} --> G0["generate.mjs to api-test-generator"]
+        G0 --> SPECS[/"generated specs + results.json"/]
+    end
+    ART1 --> PRIO
+
+    %% ===================== MODULE 3 — EXECUTION (new) =====================
+    subgraph EXEC["NEW · testo run — Module 3 (Execution: self-healing · cache · hooks)"]
+    direction TB
+        R0["test-executor/run.mjs<br/>orchestrate · normalize"] --> HEAL["heal.mjs<br/>healClick · healFill · resolve"]
+        HEAL --> HENG["heal-engine.mjs<br/>snapshot · LLM infer · cache R/W"]
+        HENG --> CACHE[/"action-cache.json<br/>sig to selector"/]
+        CACHE -. hit .-> HENG
+        HENG --> MAC["model-api-connector<br/>getClient().chat()"]
+        R0 --> FLAKE["flake.mjs<br/>retry-once · classify"]
+        R0 --> HOOKS["hooks/run-hook.mjs<br/>docker sandbox"]
+        R0 --> REP["report-generator<br/>report.html"]
+        R0 --> EXOUT[/"results.json + heal-events.json"/]
+        HEAL --> EXOUT
+    end
+    SPECS --> R0
+
+    %% ===================== MODULE 2 — SKILL MEMORY (new) =====================
+    subgraph MEM["NEW · testo learn — Module 2 (Skill Memory)"]
+    direction TB
+        L0["skill-distiller/skill.py<br/>build_trace · distill_llm · route_and_write"] --> BRES["BackendResolver<br/>(LLM seam)"]
+        SKMD["memory/SKILL.md<br/>schema · routing"] --> L0
+        L0 --> STORE[/"memory/skills/*.md + index.json<br/>★ shared store"/]
+        STORE --> GETSK["get_skill / get_skill_file<br/>(agentic-harness tools)"]
+        STORE --> SEL["memory/select.py<br/>select(target,page) to context"]
+        STORE --> CONS["consolidate/skill.py<br/>merge · supersede · prune"]
+        CONS --> STORE
+    end
+    EXOUT --> L0
+    TKG -. triples .-> STORE
+    SEL -. context .-> G0
+    SEL -. context .-> HEAL
+    GETSK -. recall .-> A0
+
+    %% ===================== ASK (existing) =====================
+    subgraph ASKF["testo ask"]
+    direction TB
+        A0["ask.py to AgenticHarness loop"]
+    end
+
+    VIEW --> DONE(["Outputs: graphs · gaps · results · memory skills"])
+    REP --> DONE
+    STORE --> DONE
+    A0 --> DONE
+
+    %% ===================== COLORS =====================
+    classDef existing fill:#e9ecef,stroke:#868e96,color:#1e1e1e;
+    classDef m1 fill:#a5d8ff,stroke:#1971c2,color:#0b2545;
+    classDef m3 fill:#ffec99,stroke:#e67700,color:#3b2f00;
+    classDef heal fill:#ffc9c9,stroke:#c92a2a,color:#5c1a1a;
+    classDef m2 fill:#b2f2bb,stroke:#2f9e44,color:#0b3d1a;
+    classDef store fill:#d0bfff,stroke:#6d28d9,color:#2e1065;
+    classDef seam fill:#c3fae8,stroke:#0c8599,color:#063b3b;
+
+    class Start,Disp,S0,RUN,EXIST_EXTR,IDX,IDXO,VIEW,G0,SPECS,A0,DONE,Leg existing;
+    class TKG,ANALYZE,FEAT,GAP,MIND,ART1,PRIO m1;
+    class R0,CACHE,FLAKE,HOOKS,REP,EXOUT m3;
+    class HEAL,HENG heal;
+    class L0,SKMD,GETSK,SEL,CONS m2;
+    class STORE store;
+    class MAC,BRES seam;

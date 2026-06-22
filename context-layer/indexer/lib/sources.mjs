@@ -9,6 +9,7 @@ import path from 'node:path';
 /**
  * @typedef {Object} LoadedSources
  * @property {Object|null} crawler              - output/crawler/bundle.json
+ * @property {Object|null} crawlerOpenApi       - output/crawler/api-spec/openapi.json (crawler-inferred OpenAPI)
  * @property {Object|null} graphify             - output/graphify/bundle.json
  * @property {Object|null} graphifyGraph        - output/graphify/graph.json (parsed)
  * @property {Object|null} dbSchema             - output/db-schema/bundle.json
@@ -29,6 +30,7 @@ import path from 'node:path';
 export function loadAllSources(repoRoot) {
   const out = {
     crawler: null,
+    crawlerOpenApi: null,
     mockData: null,
     openapiSpec: null,
     graphify: null,
@@ -42,6 +44,10 @@ export function loadAllSources(repoRoot) {
   // crawler — the deterministic heuristic crawler's bundle.
   out.crawler = _safeReadJson(path.join(repoRoot, 'output', 'crawler', 'bundle.json'));
   if (out.crawler?.target) out.target ??= out.crawler.target;
+
+  // crawler OpenAPI — inferred from live captures by content-extractor/crawler/spec.mjs
+  // (headers + request/response examples). Feeds the api-spec contract topic.
+  out.crawlerOpenApi = _safeReadJson(path.join(repoRoot, 'output', 'crawler', 'api-spec', 'openapi.json'));
 
   // mock-data — real request/response samples distilled from the crawler.
   out.mockData = _safeReadJson(path.join(repoRoot, 'output', 'mock-data', 'bundle.json'));

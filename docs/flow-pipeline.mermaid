@@ -1,0 +1,95 @@
+---
+title: Process Flow (as-built) — Testing Harness pipeline
+---
+flowchart TD
+    Start(["User runs testo CLI"]) --> Disp{"testo subcommand?"}
+    Disp -->|scan| S0
+    Disp -->|generate api-tests| G0
+    Disp -->|ask| A0
+    Leg["Legend:  parallelogram = output artifact ·  diamond = decision/gate ·  dashed = planned/not-wired"]
+
+    %% ===================== SCAN =====================
+    subgraph SCAN["testo scan — context-layer pipeline (scan.mjs STAGES)"]
+    direction TB
+        S0["scan.mjs<br/>run STAGES via execFileSync 'node'"] --> RUN["content-extractor/run.mjs<br/>discover extractors + code-extractors"]
+        RUN --> CR
+        RUN --> GATE{"TARGET_CODEBASE set?"}
+        GATE -->|no| NOcode["graphify / db-schema / framework / code-extractors skipped"]
+
+        subgraph ST1["Stage 1 — primary sources (parallel)"]
+        direction TB
+            FW["framework-extractor/extract.py<br/>CompositeFrameworkDetector"] --> FWD[/"framework-detection.json<br/>recommended_extractors"/]
+            CR["crawler/extract.mjs"] --> CRP["scripts/crawler<br/>crawl -> analyze -> spec -> mindmap -> generator"]
+            CRP --> CRA["annotateClickableIntents<br/>(llm-advisor.adviseOn)"]
+            CRA --> CRO[/"output/crawler/* + sources/crawler.json<br/>(tier live_observed 0.95)"/]
+            GfX["graphify/extract.mjs"] --> CT["call_tool.py -> GraphifyTool.execute"]
+            CT --> GCLI["graphify CLI<br/>detect -> AST -> semantic (LLM)"]
+            GCLI --> GJ[/"output/graphify/graph.json + bundle.json<br/>(tier graph_extracted 0.65)"/]
+            DBX["db-schema/extract.py"] --> DBD["deterministic/extract.py<br/>SQLAlchemy AST (no LLM)"]
+            DBX --> DBL["llm/extract.py<br/>MiniMax (Django/Prisma/TypeORM)"]
+            DBD --> DBM{"_merge by table<br/>(ast wins, llm corroborates)"}
+            DBL --> DBM
+            DBM --> DBO[/"output/db-schema/bundle.json"/]
+        end
+
+        subgraph ST2["Stage 2 — depend on crawler (parallel)"]
+        direction TB
+            MK["mock-data-extractor/extract.mjs<br/>distil req/resp samples"] --> MKO[/"output/mock-data/bundle.json"/]
+            OA["openapi-extractor/extract.mjs<br/>probe origins + resolve $ref"] --> OAO[/"output/openapi/bundle.json<br/>(tier spec 0.95)"/]
+        end
+
+        subgraph ST3["Stage 3 — code-extractors (gated by recommendation)"]
+        direction TB
+            CErec{"lang in recommended_extractors?"} -->|yes| CE["code-extractors/[lang]/extract.py<br/>delegate to _lib/testing_agent"]
+            CErec -->|no| CEskip["skip lang"]
+            CE --> CEO[/"output/sources/[lang].json"/]
+        end
+
+        GATE -->|yes| FW
+        GATE -->|yes| GfX
+        GATE -->|yes| DBX
+        GATE -->|yes| CErec
+        FWD --> CErec
+        CRO --> MK
+        CRO --> OA
+
+        CRO --> IDX
+        GJ --> IDX
+        DBO --> IDX
+        MKO --> IDX
+        OAO --> IDX
+        CEO --> IDX
+        IDX["indexer/index.mjs<br/>loadAllSources -> TOPIC_REGISTRY (12 topics)"] --> IDXO[/"output/indexed_output/[topic].json + index.json"/]
+        IDXO --> VIEW["graph-viewer/index.mjs<br/>SHAPERS -> renderToFile"]
+        VIEW --> VIEWO[/"indexed_output/graphs/*.html"/]
+        IDXO -. planned .-> PLAN["gap-analyzer · feature-extractor<br/>knowledge-synthesizer · mind-map-builder<br/>(empty dirs, commented out in scan.mjs)"]
+    end
+
+    %% ===================== GENERATE =====================
+    subgraph GENF["testo generate api-tests (deterministic, curl-based)"]
+    direction TB
+        G0["generate.mjs -> call_skill.py<br/>api-test-generator --mode direct"] --> GSV["SkillService.invoke_direct<br/>ApiTestGeneratorSkill._run_sync"]
+        GSV --> GLD["load apis.json / db-schema / mock-data / openapi"]
+        GLD --> GLOG["login_flow.attempt_login -> Bearer token"]
+        GLOG --> GLOOP{"for each api_item<br/>(up to max_tests)"}
+        GLOOP -->|is_exempt| GSKIP["skip session-mutating"]
+        GLOOP -->|test| GSY["request_synth.synthesize_body<br/>curl_builder.build_curl"]
+        GSY --> GRUN["test_runner.execute_curl<br/>(subprocess curl)"]
+        GRUN --> GRES[/"runs/[id].json"/]
+        GRES --> GLOOP
+        GLOOP -->|done| GREP[/"reporter -> results.json + report.md"/]
+    end
+
+    %% ===================== ASK =====================
+    subgraph ASKF["testo ask (agentic tool-use loop)"]
+    direction TB
+        A0["ask.py -> BackendResolver<br/>AgenticHarness / QueryEngine"] --> ALOOP["QueryEngine.submit_message -> LLM"]
+        ALOOP --> ADEC{"LLM output?"}
+        ADEC -->|tool_call| ATOOL["toolbelt.execute<br/>bash / read / grep / graphify"]
+        ATOOL --> ALOOP
+        ADEC -->|final answer| AANS["answer"]
+    end
+
+    VIEWO --> Done(["Outputs: indexed_output · graphs · results.json · answer"])
+    GREP --> Done
+    AANS --> Done

@@ -44,7 +44,7 @@ const VENV_PY = path.join(__dirname, '_lib', '.venv', 'bin', 'python');
 const STAGES = [
   {
     name: 'stage 1 — independent primary sources',
-    primary: ['framework-extractor', 'crawler', 'graphify', 'db-schema'],
+    primary: ['framework-extractor', 'crawler', 'graphify', 'db-schema', 'text-kg', 'jira', 'confluence'],
   },
   {
     name: 'stage 2 — depends on crawler',
@@ -63,6 +63,9 @@ const GATES = {
   graphify:              'TARGET_CODEBASE',
   'framework-extractor': 'TARGET_CODEBASE',
   'db-schema':           'TARGET_CODEBASE',
+  'text-kg':             'TEXT_KG_SOURCE',      // local docs folder/file
+  jira:                  'JIRA_BASE_URL',       // remote Jira
+  confluence:            'CONFLUENCE_BASE_URL', // remote Confluence
 };
 
 const ONLY = (process.env.ONLY ?? '').split(',').filter(Boolean);
@@ -160,6 +163,9 @@ const WIPE_DIRS = [
   'output/graphify_graph',
   'output/db-schema',
   'output/code-extractors',
+  'output/text-kg',     // doc-derived sources; .kg-cache/ lives outside output/<id> so it survives
+  'output/jira',
+  'output/confluence',
 ];
 const WIPE_FILES = [
   'output/framework-detection.json',

@@ -10,6 +10,8 @@
 //   intent  green ellipse   LLM-annotated user action (red if destructive)
 //   form    yellow diamond  HTML form
 //   api     orange diamond  HTTP endpoint (live + code-declared)
+//   state   teal hexagon    in-page change (modal / dropdown / tab)
+//   control magenta △/▢/▽   editable input / toggle / expander (Playwright selector)
 
 const PALETTE = Object.freeze({
   pageVisited:   { background: '#4682b4', border: '#1f4d6e', highlight: { background: '#5a96c8', border: '#1f4d6e' } },
@@ -20,12 +22,19 @@ const PALETTE = Object.freeze({
   form:          { background: '#ffd964', border: '#a89139', highlight: { background: '#ffe592', border: '#a89139' } },
   api:           { background: '#f0ad4e', border: '#a76e1f', highlight: { background: '#f4be72', border: '#a76e1f' } },
   apiOrphan:     { background: '#f6d9b3', border: '#a76e1f', highlight: { background: '#fae3c5', border: '#a76e1f' } },
+  state:         { background: '#20b2aa', border: '#0f5e5a', highlight: { background: '#3fc8c0', border: '#0f5e5a' } },
+  control:       { background: '#e26fce', border: '#8a2d7e', highlight: { background: '#ec92db', border: '#8a2d7e' } },
 });
+
+// distinct symbol per control kind (vis-network shape names)
+const CONTROL_SHAPE = Object.freeze({ edit: 'triangle', toggle: 'square', expand: 'triangleDown' });
 
 const EDGE_STYLE = Object.freeze({
   contains:      { color: '#888888', dashes: false, width: 1 },
   'contains-form': { color: '#a89139', dashes: false, width: 1 },
+  'has-control': { color: '#e26fce', dashes: false, width: 1 },
   navigates_to:  { color: '#4682b4', dashes: false, width: 2 },
+  state:         { color: '#20b2aa', dashes: [2, 3], width: 1 },
   invokes:       { color: '#f0ad4e', dashes: false, width: 2 },
   triggers:      { color: '#cc8800', dashes: [4, 4], width: 1 },
   submits_to:    { color: '#a89139', dashes: false, width: 2 },
@@ -132,6 +141,34 @@ export function shape(bundle) {
     });
   }
 
+  // ── states (in-page changes: modal / dropdown / tab) ──────────────────
+  for (const s of graph.nodes.states ?? []) {
+    nodes.push({
+      id: _assignId(s.id),
+      label: _truncate(s.label || 'state', 22),
+      title: _tooltipState(s),
+      group: 'state',
+      color: PALETTE.state,
+      shape: 'hexagon',
+      size: 13,
+      _kind: 'state', _raw: s,
+    });
+  }
+
+  // ── controls (editable inputs / toggles / expanders) ──────────────────
+  for (const c of graph.nodes.controls ?? []) {
+    nodes.push({
+      id: _assignId(c.id),
+      label: _truncate(c.label || c.controlKind || 'control', 20),
+      title: _tooltipControl(c),
+      group: `control-${c.controlKind || 'edit'}`,
+      color: PALETTE.control,
+      shape: CONTROL_SHAPE[c.controlKind] || 'triangle',
+      size: 12,
+      _kind: 'control', _raw: c,
+    });
+  }
+
   // ── edges ─────────────────────────────────────────────────────────────
   const edges = [];
   let dropped = 0;
@@ -165,6 +202,8 @@ export function shape(bundle) {
       `${counts.intents ?? 0} intents`,
       `${counts.forms ?? 0} forms`,
       `${counts.apis ?? 0} APIs (${counts.apisWithCallers ?? 0} with callers)`,
+      `${counts.states ?? 0} states`,
+      `${counts.controls ?? 0} controls`,
       `${edges.length} edges`,
     ].join(' · '),
     generatedAt: bundle.generatedAt,
@@ -177,18 +216,24 @@ export function shape(bundle) {
       forms: counts.forms ?? 0,
       apis: counts.apis ?? 0,
       apisWithCallers: counts.apisWithCallers ?? 0,
+      states: counts.states ?? 0,
+      controls: counts.controls ?? 0,
       edges: edges.length,
       droppedEdges: dropped,
     },
+    // Each legend row carries the entity `kind` so render-html can render a
+    // per-type filter toggle, a colour swatch, and a shape symbol.
     legend: [
-      { color: PALETTE.pageVisited.background,   label: 'Page (crawled)' },
-      { color: PALETTE.pageUnvisited.background, label: 'Page (referenced, not crawled)' },
-      { color: PALETTE.route.background,         label: 'Frontend route declaration' },
-      { color: PALETTE.intent.background,        label: 'Intent (safe)' },
-      { color: PALETTE.destructive.background,   label: 'Intent (destructive)' },
-      { color: PALETTE.form.background,          label: 'Form' },
-      { color: PALETTE.api.background,           label: 'API (has callers)' },
-      { color: PALETTE.apiOrphan.background,     label: 'API (no caller observed)' },
+      { kind: 'page',    color: PALETTE.pageVisited.background,   symbol: '▭', label: 'Page (crawled)' },
+      { kind: 'page',    color: PALETTE.pageUnvisited.background, symbol: '▢', label: 'Page (referenced, not crawled)' },
+      { kind: 'route',   color: PALETTE.route.background,         symbol: '▢', label: 'Frontend route declaration' },
+      { kind: 'intent',  color: PALETTE.intent.background,        symbol: '⬭', label: 'Intent (safe)' },
+      { kind: 'intent',  color: PALETTE.destructive.background,   symbol: '⬭', label: 'Intent (destructive)' },
+      { kind: 'form',    color: PALETTE.form.background,          symbol: '◆', label: 'Form' },
+      { kind: 'api',     color: PALETTE.api.background,           symbol: '◆', label: 'API (has callers)' },
+      { kind: 'api',     color: PALETTE.apiOrphan.background,     symbol: '◇', label: 'API (no caller observed)' },
+      { kind: 'state',   color: PALETTE.state.background,         symbol: '⬡', label: 'State change (modal/dropdown/tab)' },
+      { kind: 'control', color: PALETTE.control.background,       symbol: '▲', label: 'Control: edit (△) · toggle (▢) · expand (▽)' },
     ],
   };
   return { nodes, edges, meta };
@@ -248,6 +293,25 @@ function _tooltipApi(a) {
     a.observedBy?.length ? `Observed by: ${(a.observedBy ?? []).join(', ')}` : null,
     `Callers observed: <b>${a.callerCount ?? 0}</b>`,
     a.samples ? `Live samples: ${a.samples}` : null,
+  ].filter(Boolean).join('<br/>');
+}
+
+function _tooltipState(s) {
+  return [
+    `<b>State change</b>: ${_escape(s.label || '(state)')}`,
+    `On page: ${_escape(s.page)}`,
+    s.triggeredBy ? `Triggered by: ${_escape(s.triggeredBy)}` : null,
+    s.selector ? `Selector: <code>${_escape(s.selector)}</code>` : null,
+  ].filter(Boolean).join('<br/>');
+}
+
+function _tooltipControl(c) {
+  return [
+    `<b>Control</b> (${_escape(c.controlKind || 'edit')}): ${_escape(c.label || '(unnamed)')}`,
+    `On page: ${_escape(c.page)}`,
+    c.tag ? `Tag: <code>${_escape(c.tag)}</code>${c.inputType ? ` type=${_escape(c.inputType)}` : ''}${c.role ? ` role=${_escape(c.role)}` : ''}` : null,
+    c.name ? `Name: <code>${_escape(c.name)}</code>` : null,
+    c.selector ? `Selector: <code>${_escape(c.selector)}</code>` : null,
   ].filter(Boolean).join('<br/>');
 }
 

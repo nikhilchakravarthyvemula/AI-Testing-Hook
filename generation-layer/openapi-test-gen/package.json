@@ -1,0 +1,16 @@
+{
+  "name": "openapi-test-gen",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "Spec-driven JS API tester — generates + runs tests from the captured OpenAPI spec, validates responses, and diffs against an official spec.",
+  "scripts": {
+    "api-test": "node openapi-test-gen.mjs",
+    "write-test": "node write-test-gen.mjs",
+    "spec-diff": "node spec-diff.mjs"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.1",
+    "playwright": "^1.60.0"
+  }
+}

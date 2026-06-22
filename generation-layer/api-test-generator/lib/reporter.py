@@ -60,6 +60,7 @@ def write_run_artifact(runs_dir: Path, t: TestResult, *, ran_at_iso: str | None 
         "method": t.method,
         "url": t.url,
         "ok": t.ok,
+        "repair_attempts": t.repair_attempts,
         "ran_at": ran_at_iso or datetime.now(tz=timezone.utc).isoformat(),
         "request": {
             "method": t.method,
@@ -165,6 +166,7 @@ def _test_to_summary_json(t: TestResult) -> dict:
         "http_status": t.http_status,
         "timing_ms": int((t.timing_s or 0) * 1000) if t.timing_s else None,
         "error": t.error,
+        "repair_attempts": t.repair_attempts,
         "response_body_preview": t.response_body_preview,
         "runs_file": f"runs/{safe}.json",
         "curl_script": f"curls/{safe}.sh",

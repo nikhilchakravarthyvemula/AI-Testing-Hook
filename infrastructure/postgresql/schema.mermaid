@@ -1,0 +1,215 @@
+%% AI Testing Harness — DB ER diagram (full). Renders on GitHub / mermaid.live.
+%% Mirrors schema.example.sql. [v1] = must-have; [later] = future module.
+erDiagram
+  target_app   ||--o{ run            : "has"
+  target_app   ||--o{ skill_memory   : "learns"
+  target_app   ||--o{ credential_ref : "vault ref"
+
+  run          ||--o{ run_stage      : "stages"
+  run          ||--|| questionnaire  : "intake"
+  run          ||--|| indexed_output : "header"
+  run          ||--o{ indexed_item   : "items"
+  run          ||--o{ api_endpoint   : "discovers"
+  run          ||--o{ ui_page        : "discovers"
+  run          ||--o{ ui_route       : "discovers"
+  run          ||--o{ click_edge     : "flows"
+  run          ||--o{ data_model     : "models"
+  run          ||--o{ observed_sample: "samples"
+  run          ||--o{ test_suite     : "generates"
+  run          ||--o{ artifact       : "writes"
+  run          ||--o{ execution      : "runs"
+  run          ||--o{ run_metric     : "scores"
+  run          ||--o{ kb_embedding   : "embeds"
+
+  api_endpoint ||--o| api_contract   : "contract"
+  api_endpoint ||--o{ observed_sample: "observed"
+  api_endpoint ||--o{ test_case      : "api/perf target"
+  ui_page      ||--o{ ui_form_field  : "fields"
+  ui_page      ||--o{ click_edge     : "edges"
+  ui_page      ||--o{ test_case      : "ui target"
+
+  test_suite   ||--o{ test_case      : "cases"
+  test_suite   ||--o{ execution      : "executed as"
+  test_case    ||--o| artifact       : "script"
+  test_case    ||--o{ test_result    : "results"
+  execution    ||--o{ test_result    : "produces"
+  execution    ||--o{ run_metric     : "aggregates"
+
+  target_app {
+    uuid id PK
+    text name
+    text base_url
+    text repo_url
+  }
+  run {
+    uuid id PK
+    uuid target_app_id FK
+    run_status status
+    text base_url
+    jsonb config
+    int total_ms
+  }
+  run_stage {
+    uuid id PK
+    uuid run_id FK
+    stage_kind stage
+    stage_status status
+    int duration_ms
+  }
+  questionnaire {
+    uuid id PK
+    uuid run_id FK
+    test_kind_arr test_kinds
+    text auth_mode
+    text creds_ref
+    jsonb sla
+    jsonb answers
+  }
+  indexed_output {
+    uuid id PK
+    uuid run_id FK
+    jsonb topic_counts
+    jsonb sources_contributing
+  }
+  indexed_item {
+    uuid id PK
+    uuid run_id FK
+    text topic
+    text item_key
+    jsonb primary_data
+    real confidence
+  }
+  api_endpoint {
+    uuid id PK
+    uuid run_id FK
+    text method
+    text origin
+    text path
+    text auth_scheme
+    bool is_write
+    jsonb request_schema
+    int_arr status_codes
+  }
+  api_contract {
+    uuid id PK
+    uuid endpoint_id FK
+    jsonb headers
+    jsonb request_body
+    jsonb expected
+    bool verified
+  }
+  ui_page {
+    uuid id PK
+    uuid run_id FK
+    text url
+    text title
+    jsonb forms
+    int http_status
+  }
+  ui_form_field {
+    uuid id PK
+    uuid page_id FK
+    text name
+    text field_type
+    text selector
+  }
+  ui_route {
+    uuid id PK
+    uuid run_id FK
+    text route_path
+    text framework
+  }
+  click_edge {
+    uuid id PK
+    uuid run_id FK
+    uuid from_page_id FK
+    uuid to_page_id FK
+    text intent
+    uuid triggers_api_id FK
+  }
+  data_model {
+    uuid id PK
+    uuid run_id FK
+    text name
+    jsonb columns
+    jsonb foreign_keys
+  }
+  observed_sample {
+    uuid id PK
+    uuid run_id FK
+    uuid endpoint_id FK
+    int status_code
+    int observed_latency_ms
+  }
+  test_suite {
+    uuid id PK
+    uuid run_id FK
+    test_kind kind
+    text tool
+    int test_count
+  }
+  test_case {
+    uuid id PK
+    uuid suite_id FK
+    test_kind kind
+    uuid endpoint_id FK
+    uuid page_id FK
+    jsonb request_body
+    jsonb expected
+    uuid artifact_id
+  }
+  artifact {
+    uuid id PK
+    uuid run_id FK
+    text kind
+    text filename
+    text storage_uri
+    text sha256
+  }
+  execution {
+    uuid id PK
+    uuid run_id FK
+    uuid suite_id FK
+    test_kind kind
+    text base_url
+    int exit_code
+  }
+  test_result {
+    uuid id PK
+    uuid execution_id FK
+    uuid test_case_id FK
+    result_status status
+    int http_status
+    int latency_ms
+    int repair_attempts
+  }
+  run_metric {
+    uuid id PK
+    uuid run_id FK
+    test_kind kind
+    int total
+    int passed
+    real pass_rate
+    int p95_ms
+    real coverage_pct
+  }
+  kb_embedding {
+    uuid id PK
+    uuid run_id FK
+    text entity_type
+    uuid entity_id
+    vector embedding
+  }
+  skill_memory {
+    uuid id PK
+    uuid target_app_id FK
+    text kind
+    text key
+    jsonb value
+  }
+  credential_ref {
+    uuid id PK
+    uuid target_app_id FK
+    text scheme
+    text secret_ref
+  }

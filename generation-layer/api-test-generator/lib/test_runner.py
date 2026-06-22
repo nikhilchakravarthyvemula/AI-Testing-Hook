@@ -47,6 +47,14 @@ class TestResult:
     response_body_truncated: bool = False
     response_headers: dict[str, str] = field(default_factory=dict)
     response_content_type: Optional[str] = None
+    # Contract assertion vs api-spec.json (additive; None when no contract).
+    expected_status: Optional[int] = None
+    body_match: Optional[bool] = None          # top-level response keys ⊇ contract keys
+    missing_keys: list = field(default_factory=list)
+
+    # Self-repair: how many times the request body was auto-fixed + re-run
+    # before this (final) result. 0 = passed/failed on the first try.
+    repair_attempts: int = 0
 
 
 def execute_curl(

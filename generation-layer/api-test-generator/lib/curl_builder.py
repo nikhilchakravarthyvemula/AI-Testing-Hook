@@ -35,6 +35,7 @@ def build_curl(
     extra_headers: Optional[dict[str, str]] = None,
     timeout_s: int = 30,
     path_params: Optional[dict[str, Any]] = None,
+    spec: Optional[dict] = None,
 ) -> tuple[list[str], str]:
     """Return (argv, pretty_shell_string).
 
@@ -52,6 +53,20 @@ def build_curl(
 
     # Collect headers from prior observations (sample headers we captured).
     headers = _collect_headers(api_item)
+    # Inject the api-spec contract's request headers (custom x-* etc.) — but
+    # NEVER auth/cookie/sensitive (those are dropped or replaced by the live
+    # token below) and not content-type/accept (forced explicitly below).
+    if spec:
+        for name, info in (spec.get("requestHeaders") or {}).items():
+            nl = str(name).lower()
+            if nl in _DROP_HEADER_NAMES or nl in ("content-type", "accept"):
+                continue
+            if (info or {}).get("sensitive"):
+                continue
+            val = (info or {}).get("example")
+            if val is None or val == "<redacted>":
+                continue
+            headers.setdefault(name, str(val))
     if extra_headers:
         headers.update(extra_headers)
     if auth_token:
