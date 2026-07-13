@@ -10,7 +10,7 @@
 //
 // Dedup key: `${METHOD}:${normalized-path}`.
 
-import { indexedItem, observation } from '../lib/models.mjs';
+import { indexedItem, observation, provenanceOf } from '../lib/models.mjs';
 
 
 const SOURCE_TIER = {
@@ -58,11 +58,10 @@ export function build(sources) {
         framework: ep.framework ?? null,
         handler: ep.handler ?? null,
       };
-      const sourceFile = ep.sourceFile ?? ep.provenance?.source_file ?? null;
       _addObservation(byKey, key, fields, {
         sourceId: id,
         discoveryTier: SOURCE_TIER[id],
-        sourceFile,
+        ...provenanceOf(ep),
       });
     }
   }
@@ -95,7 +94,6 @@ export function build(sources) {
     _addObservation(byKey, key, fields, {
       sourceId: 'crawler',
       discoveryTier: 'live_observed',
-      sourceFile: null,
     });
   }
 
@@ -114,7 +112,7 @@ export function build(sources) {
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
-function _addObservation(byKey, key, fields, { sourceId, discoveryTier, sourceFile }) {
+function _addObservation(byKey, key, fields, prov) {
   let bucket = byKey.get(key);
   if (!bucket) {
     bucket = {
@@ -123,7 +121,7 @@ function _addObservation(byKey, key, fields, { sourceId, discoveryTier, sourceFi
     };
     byKey.set(key, bucket);
   }
-  bucket.observations.push(observation({ sourceId, discoveryTier, sourceFile, fields }));
+  bucket.observations.push(observation({ ...prov, fields }));
   // Merge useful fields into `primary` — last writer with a non-null wins,
   // but live_observed always wins for runtime-only fields.
   _mergeIntoPrimary(bucket.primary, fields, sourceId);
