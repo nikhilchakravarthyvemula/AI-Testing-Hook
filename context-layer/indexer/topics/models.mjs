@@ -8,7 +8,7 @@
 // Dedup key: `${className}@${sourceFile}` — class name alone collides
 // in big repos (two `User` classes in different packages).
 
-import { indexedItem, observation } from '../lib/models.mjs';
+import { indexedItem, observation, provenanceOf } from '../lib/models.mjs';
 
 
 /** @param {import('../lib/sources.mjs').LoadedSources} sources */
@@ -28,7 +28,7 @@ export function build(sources) {
         fields: m.fields ?? [],
         bases: m.bases ?? [],
       }, {
-        sourceId: 'python-ast', discoveryTier: 'ast', sourceFile: m.sourceFile,
+        sourceId: 'python-ast', discoveryTier: 'ast', ...provenanceOf(m),
       });
     }
     for (const c of ast.classes ?? []) {
@@ -40,7 +40,7 @@ export function build(sources) {
         bases: c.bases ?? [],
         methods: (c.methods ?? []).map(m => m.name ?? m),
       }, {
-        sourceId: 'python-ast', discoveryTier: 'ast', sourceFile: c.sourceFile,
+        sourceId: 'python-ast', discoveryTier: 'ast', ...provenanceOf(c),
       });
     }
   }
@@ -64,7 +64,7 @@ export function build(sources) {
         community: n.community,
         nodeId: n.id,
       }, {
-        sourceId: 'graphify', discoveryTier: 'graph_extracted', sourceFile,
+        sourceId: 'graphify', discoveryTier: 'graph_extracted', ...provenanceOf(n),
       });
     }
   }
@@ -77,7 +77,7 @@ export function build(sources) {
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
-function _add(map, key, fields, { sourceId, discoveryTier, sourceFile }) {
+function _add(map, key, fields, prov) {
   let bucket = map.get(key);
   if (!bucket) {
     bucket = {
@@ -86,7 +86,7 @@ function _add(map, key, fields, { sourceId, discoveryTier, sourceFile }) {
     };
     map.set(key, bucket);
   }
-  bucket.observations.push(observation({ sourceId, discoveryTier, sourceFile, fields }));
+  bucket.observations.push(observation({ ...prov, fields }));
   // Prefer pydantic_model > class > graphify-node in primary.kind
   if (_kindRank(fields.kind) > _kindRank(bucket.primary.kind)) {
     bucket.primary.kind = fields.kind;

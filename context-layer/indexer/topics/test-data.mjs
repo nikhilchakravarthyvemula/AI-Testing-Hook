@@ -9,7 +9,7 @@
 //
 // Dedup key: `${page}#${formId-or-action}::${fieldName}`.
 
-import { indexedItem, observation } from '../lib/models.mjs';
+import { indexedItem, observation, provenanceOf } from '../lib/models.mjs';
 
 
 /** @param {import('../lib/sources.mjs').LoadedSources} sources */
@@ -58,8 +58,7 @@ export function build(sources) {
         autocomplete: f.autocomplete,
         isDisabled: f.is_disabled,
       }, {
-        sourceId: id, discoveryTier: 'ast',
-        sourceFile: f.provenance?.source_file ?? null,
+        sourceId: id, discoveryTier: 'ast', ...provenanceOf(f),
       });
     }
   }
@@ -70,7 +69,7 @@ export function build(sources) {
 }
 
 
-function _add(map, key, fields, { sourceId, discoveryTier, sourceFile }) {
+function _add(map, key, fields, prov) {
   let bucket = map.get(key);
   if (!bucket) {
     bucket = {
@@ -84,7 +83,7 @@ function _add(map, key, fields, { sourceId, discoveryTier, sourceFile }) {
     };
     map.set(key, bucket);
   }
-  bucket.observations.push(observation({ sourceId, discoveryTier, sourceFile, fields }));
+  bucket.observations.push(observation({ ...prov, fields }));
   bucket.primary.fieldType ??= fields.fieldType;
   bucket.primary.formIntent ??= fields.formIntent;
 }

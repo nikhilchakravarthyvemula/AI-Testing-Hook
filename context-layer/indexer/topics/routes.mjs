@@ -9,7 +9,7 @@
 //
 // Dedup key: normalised path.
 
-import { indexedItem, observation } from '../lib/models.mjs';
+import { indexedItem, observation, provenanceOf } from '../lib/models.mjs';
 
 
 const FRONTEND_SOURCES = new Set([
@@ -48,7 +48,7 @@ export function build(sources) {
       bucket.observations.push(observation({
         sourceId: id,
         discoveryTier: 'ast',
-        sourceFile: route.provenance?.source_file ?? null,
+        ...provenanceOf(route),
         fields,
       }));
       // Track which frameworks declare each path (a route can appear in

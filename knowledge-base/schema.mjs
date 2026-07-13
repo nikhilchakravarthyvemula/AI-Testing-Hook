@@ -4,6 +4,10 @@
 // Every fact in knowledge.json carries provenance: which source produced it,
 // what kind of extraction was used, and how much we trust it. This file is
 // the single source of truth for those semantics across the entire system.
+// Nothing else may declare its own tier→confidence table (see the indexer's
+// models.mjs, which imports confidenceForTier from here rather than mirroring it).
+
+import { createHash } from 'node:crypto';
 
 // ── enums ──────────────────────────────────────────────────────────────────
 
@@ -98,12 +102,56 @@ export function provenance({
 }
 
 /**
- * Combine two confidence values when the same fact is seen by two sources.
- * Conservative: returns the max of the two — not strict Bayesian, but
- * sensible: if any high-confidence source confirms a fact, we trust it.
- * Both sources must agree on the fact (compare by content); this function
- * doesn't check that.
+ * Combine two confidence values when the same fact is corroborated by two
+ * **independent** sources — the noisy-OR rule: `1 − (1 − a)(1 − b)`.
+ *
+ * Rationale: two independent 0.90 observations of the same endpoint should
+ * make us *more* sure than either alone (→ 0.99), not merely as sure (MAX).
+ * Noisy-OR is monotonic, commutative, associative, and stays within [0, 1],
+ * so it folds cleanly across any number of sources.
+ *
+ * INDEPENDENCE MATTERS. This must only be folded across sources whose evidence
+ * is not derived from one another. Correlated observations (e.g. two AST passes
+ * over the same file) would be double-counted and inflate confidence — collapse
+ * those to a single value with MAX *before* combining families here. The
+ * Knowledge-Synthesizer (Component 2) enforces exactly that: MAX within a source
+ * family, noisy-OR across families.
+ *
+ * Both inputs are assumed to be in [0, 1] and to describe the *same* fact
+ * (agreement is the caller's responsibility — this function does not check it).
  */
 export function combineConfidence(a, b) {
-  return Math.max(a, b);
+  return 1 - (1 - a) * (1 - b);
+}
+
+// ── content hashing (staleness / lineage) ──────────────────────────────────
+
+/**
+ * Deterministic content hash for a fact's payload — the anchor for staleness
+ * detection and incremental (Merkle-style) re-indexing downstream. Equal
+ * content ⇒ equal hash across runs and machines, so a fact only counts as
+ * "changed" when its content actually changed.
+ *
+ * Keys are sorted recursively before hashing so that object key order (which
+ * carries no meaning in JSON) never perturbs the hash. Returns a 16-char
+ * SHA-256 prefix — short enough to store per-fact, wide enough to avoid
+ * collisions at our scale.
+ *
+ * @param {unknown} value  any JSON-serialisable fact payload
+ * @returns {string} 16-char lowercase hex
+ */
+export function contentHashOf(value) {
+  return createHash('sha256').update(_canonicalJson(value)).digest('hex').slice(0, 16);
+}
+
+/** Stable JSON: object keys sorted recursively; arrays keep their order. */
+function _canonicalJson(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map(_canonicalJson).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map(k => `${JSON.stringify(k)}:${_canonicalJson(value[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(value ?? null);
 }

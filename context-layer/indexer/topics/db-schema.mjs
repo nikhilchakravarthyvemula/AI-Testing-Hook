@@ -8,7 +8,7 @@
 // One IndexedItem per table. Observations track which sub-extractors
 // (deterministic vs LLM) contributed.
 
-import { indexedItem, observation } from '../lib/models.mjs';
+import { indexedItem, observation, provenanceOf } from '../lib/models.mjs';
 
 export const topicName = 'db-schema';
 
@@ -24,7 +24,7 @@ export function build(sources) {
                    : s.sourceId === 'llm'           ? 'db-schema (llm)'
                    : 'db-schema',
       discoveryTier: s.tier ?? 'ast',
-      sourceFile:    t.sourceFile ?? null,
+      ...provenanceOf(t),
       fields:        t,
     }));
     return indexedItem(topicName, (t.table || '').toLowerCase(), _primaryFromTable(t), observations);
