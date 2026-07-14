@@ -5,8 +5,8 @@
 // knowledge-base material.
 //
 // Live today: content-extractor → indexer → knowledge-synthesizer →
-// graph-viewer. As the remaining sub-components land (gap-analyzer,
-// feature-extractor, mind-map-builder), they slot into this pipeline:
+// gap-analyzer → graph-viewer. As the remaining sub-components land
+// (feature-extractor, mind-map-builder), they slot into this pipeline:
 //
 //   inputs
 //     ↓
@@ -46,6 +46,11 @@ const STAGES = [
     id: 'knowledge-synthesizer',
     entrypoint: path.join(__dirname, 'knowledge-synthesizer', 'synthesize.mjs'),
     description: 'Reconcile exact-key duplicates into one trustworthy CanonicalFact per entity',
+  },
+  {
+    id: 'gap-analyzer',
+    entrypoint: path.join(__dirname, 'gap-analyzer', 'analyze.mjs'),
+    description: 'Surface + rank coverage holes (shadow / untested / conflict / low-trust) from the facts',
   },
   {
     id: 'graph-viewer',
