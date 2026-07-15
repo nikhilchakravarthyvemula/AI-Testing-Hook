@@ -12,7 +12,7 @@ export const BUILTIN_SYNONYMS = Object.freeze({
 export const DISPLAY_LABELS = Object.freeze({ auth: 'Authentication' });
 
 /** Per-fact signal names — strong = structural (rules 1–3). */
-export const STRONG_SIGNALS = new Set(['api-path', 'route-fragment', 'redirect-to']);
+export const STRONG_SIGNALS = new Set(['api-path', 'route-fragment', 'route-path', 'redirect-to']);
 
 const API_MARKERS = new Set(['api', 'rest', 'graphql']);
 const isMarker = (seg) => API_MARKERS.has(seg) || /^v\d+$/i.test(seg);
@@ -62,6 +62,21 @@ export function routeFragment(urlish) {
 }
 
 /**
+ * First path segment of a URL-ish string, with scheme/host/hash/query and any
+ * `::`-suffixed interaction id stripped. `https://app/home/x` → `home`,
+ * `/audit-logs` → `audit-logs`. Used for path-routed apps that carry no SPA
+ * hash fragment.
+ */
+export function firstPathSegment(urlish) {
+  let s = String(urlish ?? '');
+  if (/^https?:\/\//i.test(s)) {
+    try { s = new URL(s.split('#')[0].split('::')[0]).pathname; } catch { /* keep raw */ }
+  }
+  s = s.split('#')[0].split('?')[0];
+  return s.split('/').filter(Boolean)[0] ?? null;
+}
+
+/**
  * Derive `{key, signal}` for one fact by the §5.1 precedence, or `{key:null}`
  * when no structural rule matches (co-occurrence, then _unassigned, handled by
  * the caller). The synonym map is applied to the raw segment.
@@ -81,7 +96,12 @@ export function featureKey(fact, cfg) {
   } else if (fact.kind === 'page' || fact.kind === 'interaction') {
     const urlish = fact.attributes?.fromPage ?? fact.key?.pathTemplate ?? fact.key?.id ?? fact.factId;
     raw = routeFragment(urlish);
-    signal = 'route-fragment';
+    if (raw) {
+      signal = 'route-fragment';           // hash-routed SPA (e.g. #admin/...)
+    } else {
+      raw = firstPathSegment(urlish);      // path-routed app (e.g. /home, /library)
+      signal = 'route-path';
+    }
   } else if (fact.kind === 'redirect') {
     const to = fact.attributes?.to ?? fact.key?.to ?? null;
     raw = pathSegments(to)[0] ?? null;
