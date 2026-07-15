@@ -5,8 +5,8 @@
 // indexed context material (output/indexed_output).
 //
 // Live today: content-extractor → indexer → knowledge-synthesizer →
-// gap-analyzer → graph-viewer. As the remaining sub-components land
-// (feature-extractor, mind-map-builder), they slot into this pipeline:
+// gap-analyzer → feature-extractor → graph-viewer. As the remaining
+// sub-components land (mind-map-builder), they slot into this pipeline:
 //
 //   inputs
 //     ↓
@@ -51,6 +51,11 @@ const STAGES = [
     id: 'gap-analyzer',
     entrypoint: path.join(__dirname, 'gap-analyzer', 'analyze.mjs'),
     description: 'Surface + rank coverage holes (shadow / untested / conflict / low-trust) from the facts',
+  },
+  {
+    id: 'feature-extractor',
+    entrypoint: path.join(__dirname, 'feature-extractor', 'extract.mjs'),
+    description: 'Cluster facts into features (functional areas) and roll up gaps per feature',
   },
   {
     id: 'graph-viewer',
