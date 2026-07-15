@@ -124,10 +124,23 @@ function endpointIdentity(item) {
   return { method: String(method ?? 'GET').toUpperCase(), path: path ?? '/', origin };
 }
 
-/** Templatize a page/route identity, preserving the SPA `#` fragment boundary. */
+/**
+ * Templatize a page/route identity. A full URL is reduced to its pathname
+ * (+ hash) so scheme/host don't pollute the identity — e.g.
+ * `https://app.example.com/home` → `/home`, not `https:/app.example.com/home`.
+ * Path and hash-fragment segments are both templatized; the `#` boundary is
+ * preserved so hash-routed SPAs still cluster by fragment.
+ */
 function templateUrlish(raw) {
-  const noQuery = String(raw).split('?')[0];
-  return noQuery.split('#').map(part => templatePath(part.replace(/\/{2,}/g, '/'))).join('#');
+  let s = String(raw ?? '').split('?')[0];
+  if (/^https?:\/\//i.test(s)) {
+    try {
+      const u = new URL(s.split('#')[0]);
+      const frag = s.includes('#') ? '#' + s.split('#').slice(1).join('#') : '';
+      s = u.pathname + frag;
+    } catch { /* not a parseable URL — fall through with the raw string */ }
+  }
+  return s.split('#').map(part => templatePath(part.replace(/\/{2,}/g, '/'))).join('#') || '/';
 }
 
 /**
