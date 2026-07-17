@@ -20,7 +20,7 @@ export function build(sources) {
   for (const page of pages) {
     const url = page.finalUrl || page.requestedUrl;
     if (!url) continue;
-    const key = _stripQueryHash(url);
+    const key = _stripQuery(url);
 
     const fields = {
       finalUrl: page.finalUrl,
@@ -63,11 +63,11 @@ export function build(sources) {
 }
 
 
-function _stripQueryHash(url) {
+function _stripQuery(url) {
   try {
     const u = new URL(url);
-    return `${u.origin}${u.pathname}`;
+    return `${u.origin}${u.pathname}${u.hash}`;
   } catch {
-    return url;
+    return String(url).split('?')[0];
   }
 }
