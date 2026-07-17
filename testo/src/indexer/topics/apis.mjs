@@ -28,6 +28,13 @@ const SOURCE_TIER = {
 
 const CODE_EXTRACTOR_IDS = Object.keys(SOURCE_TIER);
 
+/** Fields only a live run can observe — the crawler owns these outright. */
+const LIVE_ONLY_FIELDS = new Set([
+  'statusCounts', 'contentTypes', 'observedAuth', 'observedJwtClaims',
+  'avgRequestMs', 'avgResponseBytes', 'triggeredByPages', 'sampleCount',
+  'queryParamNames', 'origin',
+]);
+
 
 /** @param {import('../lib/sources.mjs').LoadedSources} sources */
 export function build(sources) {
@@ -122,9 +129,9 @@ function _addObservation(byKey, key, fields, prov) {
     byKey.set(key, bucket);
   }
   bucket.observations.push(observation({ ...prov, fields }));
-  // Merge useful fields into `primary` — last writer with a non-null wins,
-  // but live_observed always wins for runtime-only fields.
-  _mergeIntoPrimary(bucket.primary, fields, sourceId);
+  // Merge useful fields into `primary` — semantic fields keep the first
+  // non-empty value; runtime-only fields are owned by the live-observed source.
+  _mergeIntoPrimary(bucket.primary, fields, prov.sourceId);
 }
 
 function _mergeIntoPrimary(primary, fields, sourceId) {
@@ -132,16 +139,13 @@ function _mergeIntoPrimary(primary, fields, sourceId) {
   for (const [k, v] of Object.entries(fields)) {
     if (v === null || v === undefined) continue;
     if (Array.isArray(v) && v.length === 0) continue;
-    // Runtime-only fields: live wins outright.
-    const liveOnly = new Set([
-      'statusCounts', 'contentTypes', 'observedAuth', 'observedJwtClaims',
-      'avgRequestMs', 'avgResponseBytes', 'triggeredByPages', 'sampleCount',
-      'queryParamNames', 'origin',
-    ]);
-    if (liveOnly.has(k) && !isLive) continue;
-    if (primary[k] === undefined || primary[k] === null) {
-      primary[k] = v;
+    if (LIVE_ONLY_FIELDS.has(k)) {
+      // Only runtime can know these, so live owns them: it overwrites, and no
+      // other source may fill them in.
+      if (isLive) primary[k] = v;
+      continue;
     }
+    primary[k] ??= v;  // first non-empty wins for semantic fields
   }
 }
 

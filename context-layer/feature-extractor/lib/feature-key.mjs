@@ -77,6 +77,18 @@ export function firstPathSegment(urlish) {
 }
 
 /**
+ * The URL a page/interaction is keyed off: a page keys off its own path, an
+ * interaction off the page it fires from. `pathTemplate` keeps the `#fragment`
+ * (see canonicalize.templateUrlish), so hash-routed SPAs stay distinguishable.
+ */
+function pageContextUrl(fact) {
+  if (fact.kind === 'page') {
+    return fact.key?.pathTemplate ?? fact.attributes?.finalUrl ?? fact.attributes?.requestedUrl ?? null;
+  }
+  return fact.attributes?.fromPage ?? fact.key?.pathTemplate ?? fact.key?.id ?? fact.factId;
+}
+
+/**
  * Derive `{key, signal}` for one fact by the §5.1 precedence, or `{key:null}`
  * when no structural rule matches (co-occurrence, then _unassigned, handled by
  * the caller). The synonym map is applied to the raw segment.
@@ -94,7 +106,7 @@ export function featureKey(fact, cfg) {
     raw = apiPathSegment(fact.key?.pathTemplate, apiSegmentDepth);
     signal = 'api-path';
   } else if (fact.kind === 'page' || fact.kind === 'interaction') {
-    const urlish = fact.attributes?.fromPage ?? fact.key?.pathTemplate ?? fact.key?.id ?? fact.factId;
+    const urlish = pageContextUrl(fact);
     raw = routeFragment(urlish);
     if (raw) {
       signal = 'route-fragment';           // hash-routed SPA (e.g. #admin/...)
