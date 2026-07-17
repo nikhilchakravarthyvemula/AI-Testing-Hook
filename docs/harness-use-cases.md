@@ -71,7 +71,7 @@ deterministic code (see "The deterministic backbone" for the boundary).
 | **A1** | Test generation session | Generate | **Agent session** (multi-turn, tools) | P0 | template generator (exists) |
 | S1 | Scenario ideation | Plan | single call per feature | P0 | gap-ranked template scenarios |
 | S2 | Entity fuzzy-match | Understand | single call per residue pair | P0 | leave unmerged, confidence stays low |
-| S3 | Jira/Confluence fact extraction | Understand + on demand in Generate | single call per document | P0 | source skipped, disclosed in report |
+| S3 | Jira/Confluence fact extraction | Understand + on demand in Generate | single call per document | P1 | source skipped, disclosed in report |
 | S4 | Code semantic enrichment | Acquire | single call per entity (exists in graphify) | P0 | raw AST graph |
 | S5 | Heal judge | Execute | single call per failure, **one cycle** | P1 | failure reported raw |
 | S6 | Mock-data values | Generate | single call per schema | P1 | field-type defaults (planned anyway) |
@@ -132,6 +132,10 @@ oddity) goes to a single yes/no match call per pair. Low volume **by design**
   lower confidence each; the transparency section says so.
 
 ### S3 — Jira/Confluence fact extraction
+
+*Deferred to P1 (decided 2026-07-17): built fixtures-first — recorded
+ticket/page JSON in the repo — with the mcp-atlassian wiring as a thin,
+config-swappable last step when a real instance exists.*
 
 When credentials are provided, the run pulls relevant tickets and pages via
 `mcp-atlassian` (fetching is plain RPC — no LLM needed to *fetch*). The LLM
@@ -209,17 +213,23 @@ the place that proposal has to argue with.
 
 ## Engine & seams
 
-One engine: the **GitHub Copilot SDK** (Python, GA June 2026 — same agent
-runtime as Copilot CLI), living behind our existing `agentic-harness` seam.
-Nothing else in the codebase knows Copilot exists.
+One **seam**, swappable engines (decided 2026-07-17 — see `docs/specs/p0-02`):
+the target engine at work remains the **GitHub Copilot SDK** (Python, GA June
+2026 — same agent runtime as Copilot CLI), but this machine has no Copilot
+seat and does have an enterprise Claude Code subscription. So the seam is
+engine-agnostic with three adapters: **Claude Agent SDK** (live development
+engine), **mock/replay** (deterministic tests, CI), and **Copilot SDK**
+(contract + stub now, implemented in P1 when a seat exists). Nothing outside
+the seam knows which engine is running.
 
 ```
 ┌─ orchestrator (Python, ours) ────────────────────────────────┐
 │                                                              │
 │  agentic-harness seam                                        │
-│   ├─ agent mode:   Copilot SDK session  ──────── A1          │
-│   └─ single mode:  Copilot SDK one-turn, no tools ── S1–S8   │
-│                    (via model-api-connector, cached)         │
+│   ├─ agent mode:   engine-adapter session ─────── A1         │
+│   └─ single mode:  engine-adapter one-turn, no tools ─ S1–S8 │
+│       (adapters: claude | mock | copilot-P1; via             │
+│        model-api-connector, cached)                          │
 │                                                              │
 │  MCPHost + SecretStore (credentials live here, only here)    │
 │   ├─ context-server (ours)      ├─ mcp-atlassian             │
@@ -301,7 +311,7 @@ access did and didn't allow it to claim.
 |---|---|---|
 | Live URL only | crawl, observed endpoints/pages, UI+API+perf tests against observed surface | "tested what the app reveals" — no documented-vs-actual gap claims |
 | + codebase | AST/route extraction, enrichment (S4), declared-vs-observed gap analysis, shadow-endpoint detection | "tested what the app reveals AND what the code declares" |
-| + Jira/Confluence creds | documented behavior + ACs (S3), documented-but-absent gaps, AC-driven scenarios | full three-way audit: documented vs declared vs observed |
+| + Jira/Confluence creds (P1) | documented behavior + ACs (S3), documented-but-absent gaps, AC-driven scenarios | full three-way audit: documented vs declared vs observed |
 
 ---
 
@@ -326,13 +336,15 @@ Four sections, all mandatory:
 
 ## Phases
 
-**P0 — first real report.** A1, S1, S2, S3, S4, the checkpoint, safe/full
+**P0 — first real report.** A1, S1, S2, S4, the checkpoint, safe/full
 modes, degradation, and all four report sections. Failures ship raw (no
-healing). This is the smallest run that produces the product.
+healing). This is the smallest run that produces the product. Component
+specs: `docs/specs/p0-00` … `p0-08`.
 
-**P1 — report quality.** S5 heal cycle, S6 mock data, S7 button
-classification. All three exist to make the report more truthful and more
-complete, not to add capability.
+**P1 — sources & report quality.** S3 Jira/Confluence (fixtures-first,
+config-swappable to a real instance), S5 heal cycle, S6 mock data, S7 button
+classification, and the Copilot SDK adapter. All exist to make the report
+more truthful and more complete, not to add capability.
 
 **P2 — niceties.** S8 feature naming.
 
