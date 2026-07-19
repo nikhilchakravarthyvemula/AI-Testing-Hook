@@ -43,10 +43,11 @@ decision (the checkpoint), and finishing with the report paths printed.
 testo run <url>
   --codebase <abs path>     enables url+code profile (else url-only)
   --mode safe|full          default safe
-  --budget <n>              default 200 (engine requests)
+  --budget <n>              default 200 (engine requests; RUN_BUDGET in .env)
   --engine claude|mock      default from .env ENGINE_PROVIDER
   --yes                     auto-approve checkpoint (CI/dev only; logged)
   --resume <runId>          re-enter an aborted run at its first non-done stage
+  --dry-run                 print the stage plan, run nothing
 ```
 
 `.env` remains the config source for everything the existing pipeline already
@@ -124,30 +125,52 @@ Approve and execute? [y/N/e]
 ```
 
 - `y` — sha256 the plan file, write `checkpoint.{approvedAt,planHash}`, continue.
-- `N` (default) — mark run `aborted` at checkpoint, exit 0. No report.
+- `N` (default) — the gate ran and returned a decision, so the checkpoint stage
+  itself ends `done`; the run's `outcome` is set to **`declined`** (not
+  `aborted` — a declined plan is not a stage *failure*) and the refusal is
+  recorded on `checkpoint.{declinedAt,reason}`. Exit 0. No report.
 - `e` — open `plan/test-plan.json` in `$EDITOR`; on close, re-validate against
   the plan schema, re-print the summary, re-prompt. Invalid edit → show
   validation errors, re-prompt.
 - `--yes` skips the prompt but writes `checkpoint.approvedBy: "--yes flag"` —
   the transparency section discloses auto-approval.
 
-Execution stages MUST verify `planHash` still matches the file before running
-(protects against edits after approval).
+The `planHash` guard: the spine ships `verifyPlanHash(dir, planPath, run)` and
+proves it in tests (a plan edited after approval fails the check). It is **not
+called during the spine's own flow** — the callers are the `generate` and
+`execute` stages, which MUST call it before acting. That wiring lands with
+p0-06 / p0-07; until then the mechanism exists but nothing invokes it, because
+nothing yet runs after the checkpoint.
 
 ## 5. Failure & resume
 
 - Any `abort` leaves `run.json` truthful (stage `failed`, later stages
-  `pending`) and exits non-zero with the failing stage's log tail.
-- `--resume <runId>` re-derives config from `run.json` (flags may not change a
-  resumed run), skips `done` stages, and re-runs from the first non-done one.
-  Resuming past an approved checkpoint re-verifies `planHash`.
+  `pending`) and exits non-zero. Stage children run with inherited stdio, so
+  their output already streamed to the terminal; the spine prints the failing
+  stage name + reason (not a re-captured log tail) and the resume hint.
+- `--resume <runId>` re-derives config from `run.json` (flags that would change
+  a resumed run are a usage error, not a silent override), skips `done` stages,
+  and re-runs from the first non-done one. A resume that lands on `generate` /
+  `execute` re-verifies `planHash` there (§4) — those stages own the check.
 
 ## 6. Acceptance
 
-1. Mock-engine end-to-end (`--engine mock --yes`) against a local fixture app:
-   every stage `done`, report files exist, zero LLM traffic.
-2. Checkpoint interactivity: `N` aborts cleanly; `e` round-trips an edit; a
-   post-approval plan edit is caught by the hash check.
-3. Kill the process mid-generate; `--resume` completes the run without
-   re-running acquire/understand/store.
-4. `run.json` after any outcome validates against the p0-00 §4 shape.
+Status as of the 2026-07-17 build (`npm run test:spine` — 57 tests). Criteria
+1 and 3 are **blocked on downstream components by design** (dependency-order
+build): they flip green when p0-07/p0-08 replace their placeholders. This is
+the two-beat "done" — spine mechanics finished now, full end-to-end later.
+
+1. ⏸ Mock-engine end-to-end (`--engine mock --yes`): every stage `done`, report
+   files exist, zero LLM traffic. — *Blocked: store/plan/generate/execute/report
+   are placeholders. Today the run reaches `store` and aborts honestly. Partial
+   evidence: acquire+understand run for real, workspace + `run.json` are
+   produced, dry-run walks all 8 stages.*
+2. ✅ Checkpoint interactivity: `N` declines cleanly; `e` round-trips an edit; a
+   post-approval plan edit is caught by the hash check. — *`checkpoint.test.mjs`.*
+3. ⏸ Kill mid-generate; `--resume` completes without re-running
+   acquire/understand/store. — *`generate` is a placeholder, so "mid-generate"
+   can't occur yet. The resume mechanism (skip `done` stages, refuse config
+   changes, reject unknown/completed/declined runs) is verified now via a
+   store-abort → resume path.*
+4. ✅ `run.json` after any outcome validates against the p0-00 §4 shape. —
+   *`workspace.test.mjs`.*

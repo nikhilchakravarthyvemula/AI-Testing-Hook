@@ -1,5 +1,14 @@
 # Agentic Harness
 
+> ⚠️ **DORMANT / SUPERSEDED (2026-07-19).** For the P0 harness the engine layer
+> is Node — single-shot calls go through `complete()` and agent sessions through
+> `runSession()`, both in `infrastructure/model-api-connector/`, both driving the
+> `claude` CLI (see `docs/specs/p0-02-engine-layer.spec.md`, OQ-4). This
+> OpenHarness/Python package is **not on any P0 path**. It's left in place as
+> reference and as a possible home for a non-Claude/local-model backend later;
+> nothing in the run pipeline imports it. Don't extend it without re-opening that
+> decision.
+
 Wraps OpenHarness to be the single LLM-tool-calling seam for the project.
 Every place that wants "an LLM with tools" goes through here instead of
 constructing `QueryEngine` ad-hoc.

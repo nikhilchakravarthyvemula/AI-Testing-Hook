@@ -17,9 +17,9 @@
 | Engine for development | **Claude Agent SDK / Claude Code headless** (enterprise subscription on this machine) |
 | Engine at work (target) | GitHub Copilot SDK — **adapter contract + stub in P0, implementation in P1** |
 | Test/CI engine | **mock/replay adapter** (recorded fixtures) — deterministic, credential-free |
-| Language split | Context layer, store, MCP server, orchestrator, executor, report: **Node**. Agent-session harness: **Python** |
+| Language split | **All Node.** (Original plan put the agent-session harness in Python; OQ-4 in p0-02, resolved 2026-07-19, showed the `claude` CLI runs the A1 session directly, so C2b is Node too. The only Python left is the pre-existing graphify/extractor island, bridged for S4 via a small CLI — p0-02 §3.4.) |
 | Tier-1 routing | S1/S2/S4 single-shot calls go through the **Node model-api-connector**, in-process |
-| A1 routing | Per-feature agent session via the **Python harness seam**, spawned by the orchestrator |
+| A1 routing | Per-feature agent session via `runSession()` (Node), driving the `claude` CLI with an MCP config — called in-process by C6 |
 | Execution sandbox | **Local child process** with timeout + teardown; executor interface designed for backend swap (Docker/E2B later) |
 | S3 (Jira/Confluence) | **Deferred to P1.** Built fixtures-first; config-swappable to a real instance |
 | Persistence | Blank slate per run; within-run content-hash caching only |
@@ -32,11 +32,11 @@
 | Order | Spec | Component | Side |
 |---|---|---|---|
 | 1 | p0-01 | Run spine — `testo run`, workspace, checkpoint, ledger | Node |
-| 2 | p0-02 | Engine layer — connector providers (Node) + harness seam v2 (Python) | both |
+| 2 | p0-02 | Engine layer — single-shot `complete()` + agent-session `runSession()` (both Node) | Node |
 | 3 | p0-03 | Per-run knowledge store (component 5-lite) + S2 residue match | Node |
 | 4 | p0-04 | Context-server MCP (component 6) | Node |
 | 5 | p0-05 | Test-plan-creator (S1) | Node |
-| 6 | p0-06 | Generation stage (A1) + S4 re-route | Python+Node |
+| 6 | p0-06 | Generation stage (A1 via runSession) + S4 re-route (+ bin/complete.mjs bridge) | Node |
 | 7 | p0-07 | Execution stage — real test-executor, safe/full enforcement | Node |
 | 8 | p0-08 | Final report — four sections, HTML + PDF | Node |
 
@@ -100,12 +100,13 @@ answers still ends `status: done` on every stage — degraded, not failed.
 ## 5. Shared contract — `ledger.jsonl`
 
 One JSON object per line, one line per engine call (cache hits included).
-Writers: Node connector (p0-02a) and Python seam (p0-02b). Append-only, no
+Writers: the Node connector — `complete()` (`caller:"connector"`) and
+`runSession()` (`caller:"session"`), both in p0-02. Append-only, no
 rewrites; the transparency report section (p0-08) and the budget check both
 read this file.
 
 ```jsonc
-{ "ts": "<ISO8601>", "useCase": "S1|S2|S4|A1", "caller": "connector|seam",
+{ "ts": "<ISO8601>", "useCase": "S1|S2|S4|A1", "caller": "connector|session",
   "engine": "claude|mock", "model": "<reported model id>",
   "requests": 1, "inputTokens": 1234, "outputTokens": 567,
   "cacheHit": false, "degraded": false, "durationMs": 2100,

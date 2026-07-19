@@ -260,22 +260,9 @@ export function hashFile(filePath) {
 
 // ── ledger (read-only here) ────────────────────────────────────────────────
 //
-// The spine never writes the ledger — C2 does. It only reads it, to show the
-// operator what the plan will cost against what's left at the checkpoint.
-
-export function readLedger(dir) {
-  const p = workspacePaths(dir).ledger;
-  if (!fs.existsSync(p)) return [];
-  return fs.readFileSync(p, 'utf8')
-    .split('\n')
-    .filter((l) => l.trim())
-    .map((l) => {
-      try { return JSON.parse(l); } catch { return null; }
-    })
-    .filter(Boolean);
-}
-
-/** Engine requests spent so far this run. */
-export function requestsSpent(dir) {
-  return readLedger(dir).reduce((sum, e) => sum + (e.requests ?? 0), 0);
-}
+// The spine never WRITES the ledger — the engine layer (C2) does. It only reads
+// it, to show the operator what the plan will cost against what's left at the
+// checkpoint. Read + budget-sum logic lives in the engine layer's ledger.mjs so
+// the number the human approves and the number enforcement uses are literally
+// the same function. Re-exported here so spine callers keep one import.
+export { readLedger, requestsSpent } from '../../../../infrastructure/model-api-connector/ledger.mjs';
