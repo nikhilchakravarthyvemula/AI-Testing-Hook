@@ -29,6 +29,7 @@ import { spawnSync } from 'node:child_process';
 
 import { stageStart, stageEnd, markDegraded, readRun, updateRun } from './workspace.mjs';
 import { runCheckpoint } from './checkpoint.mjs';
+import { buildStore } from '../../../../context-layer/knowledge-store/build.mjs';
 
 // ── the registry ───────────────────────────────────────────────────────────
 
@@ -49,7 +50,7 @@ export const STAGES = [
     name: 'store',
     failMode: 'abort',
     description: 'merge facts + features + gaps into the run store',
-    run: notImplemented('p0-03', 'context-layer/knowledge-store/build.mjs'),
+    run: store,
   },
   {
     name: 'plan',
@@ -283,6 +284,39 @@ export function snapshotContext(ctx) {
     return { ok: false, reason: 'understand produced no artifacts to snapshot' };
   }
   ctx.io.out(`  ✓ snapshotted ${copied} context artifact(s) → ${path.relative(ctx.repoRoot, ctx.paths.context)}`);
+  return { ok: true };
+}
+
+// ── store ──────────────────────────────────────────────────────────────────
+
+async function store(ctx) {
+  if (ctx.opts.dryRun) {
+    ctx.io.out('  (dry-run) build knowledge store from context/');
+    return { ok: true };
+  }
+
+  const result = await buildStore({
+    workspace: ctx.dir,
+    contextDir: ctx.paths.context,
+    target: { url: ctx.run.target.url, profile: ctx.run.profile },
+    runId: ctx.run.runId,
+    engine: {
+      provider: ctx.run.engine.provider,
+      maxRequests: ctx.run.budget.maxRequests,
+    },
+    log: (m) => ctx.io.out(`  ${m}`),
+  });
+
+  if (!result.ok) return { ok: false, reason: result.reason };
+
+  // S2 degradation is recorded but does NOT fail the stage — the store built
+  // fine; the residue just stayed unmerged, and the report will disclose it.
+  for (const d of result.degraded) markDegraded(ctx.dir, d);
+  if (result.degraded.length) ctx.run = readRun(ctx.dir);
+
+  const s = result.stats;
+  ctx.io.out(`  ✓ store: ${s.facts} facts, ${s.features} features, ${s.gaps} gaps ` +
+    `(S2: ${s.s2Merges} merged / ${s.s2Skipped} unmerged of ${s.s2Candidates} candidates)`);
   return { ok: true };
 }
 
