@@ -23,6 +23,7 @@
 | Execution sandbox | **Local child process** with timeout + teardown; executor interface designed for backend swap (Docker/E2B later) |
 | S3 (Jira/Confluence) | **Deferred to P1.** Built fixtures-first; config-swappable to a real instance |
 | Persistence | Blank slate per run; within-run content-hash caching only |
+| Context-layer outputs | Existing components keep writing to `output/`; the spine snapshots into `<workspace>/context/` after understand, and asserts acquire freshness. New components are workspace-native. See p0-01 §3.1 |
 | Report | Self-contained HTML + PDF export, both in the run workspace |
 | Acceptance target | logtrim, URL+codebase profile, safe mode |
 
@@ -73,12 +74,18 @@ output/runs/<runId>/
   "mode": "safe | full",                       // default safe
   "budget": { "maxRequests": 200 },            // per-run engine-call cap
   "engine": { "provider": "claude | mock | copilot" },
+  "outcome": "completed | aborted | declined | null",  // null = in flight or killed
+  "endedAt": "<ISO8601>|null",
   "stages": {                                  // written by the spine only
     "acquire":    { "status": "pending|running|done|failed|skipped", "startedAt": null, "endedAt": null },
     "understand": { "…": "…" }, "store": {}, "plan": {},
     "checkpoint": {}, "generate": {}, "execute": {}, "report": {}
   },
-  "checkpoint": { "approvedAt": "<ISO8601>|null", "planHash": "sha256:…" },
+  // A declined checkpoint is NOT a failed stage — the gate ran and returned a
+  // decision. It ends `done`, and the refusal is recorded here + in `outcome`.
+  "checkpoint": { "approvedAt": "<ISO8601>|null", "planHash": "sha256:…",
+                  "approvedBy": "operator | --yes flag",
+                  "declinedAt": "<ISO8601>|null", "reason": "…" },
   "degraded": [                                // one entry per fallback taken
     { "useCase": "S1", "stage": "plan", "reason": "engine unavailable",
       "fallback": "template scenarios", "at": "<ISO8601>" }

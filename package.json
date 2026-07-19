@@ -9,6 +9,7 @@
   },
   "scripts": {
     "testo": "node interfaces/cli/testo.mjs",
+    "test:spine": "node --test 'interfaces/cli/_lib/spine/*.test.mjs'",
     "login": "BASE_URL=$(node -p \"require('./scenario.json').baseUrl\") SEED_PATH=/ node scripts/crawler/login-once.mjs",
     "test:ui": "node generation-layer/ui-test-generator/gen.mjs scenario.json",
     "test:perf": "node generation-layer/perf-test-generator/gen.mjs scenario.json",

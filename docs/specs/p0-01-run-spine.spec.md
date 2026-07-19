@@ -1,6 +1,8 @@
 # P0-01 — Run Spine (`testo run`) · SPEC
 
-**Status:** Draft v1.0 (for review)
+**Status:** v1.1 — **implemented** 2026-07-17 (`interfaces/cli/commands/run.mjs`
++ `interfaces/cli/_lib/spine/`; `npm run test:spine`). Stages store/plan/
+generate/execute/report are honest placeholders until p0-03 … p0-08 land.
 **Depends on:** existing context pipeline (content-extractor → indexer →
 synthesizer → gap-analyzer → feature-extractor), existing `testo` CLI skeleton
 **Consumed by:** every other P0 component — the spine is what invokes them
@@ -69,9 +71,47 @@ stamps `stages.<name>` timestamps/status, and honors `failMode`:
 | report | p0-08 | abort |
 
 "degrade" = record in `run.json.degraded` via the spine's `markDegraded()`
-helper and continue with the documented fallback. Stage outputs land in the
-workspace paths fixed in p0-00 §3; the spine passes the workspace root to
-every entrypoint as `--workspace`.
+helper and continue with the documented fallback. A stage that is **not
+implemented yet** always aborts regardless of its declared `failMode` — there
+is no fallback to degrade *to*, and a run that quietly continued would produce
+an empty report.
+
+### 3.1 Where the context layer writes (decided 2026-07-17)
+
+New components (p0-03 … p0-08) take `--workspace` and are workspace-native.
+The **existing** context-layer components are not: each resolves its own paths
+from `__dirname` and writes to `<repo>/output/`. Threading a workspace through
+them means editing ~20 working files — including `scripts/`, which `README.md`
+marks **UNCHANGED** — plus a Python extractor. Not worth it for P0, which runs
+one human-started run at a time.
+
+So: **acquire and understand let those components write to `output/` as they
+always have, and the spine snapshots the artifacts into `<workspace>/context/`
+once understand completes.** Everything downstream reads only the workspace, so
+the blank-slate guarantee holds where it matters.
+
+The risk that buys back is staleness: `output/` is shared, so a component that
+fails could leave a *previous* run's artifacts in place and we would index them
+as fresh — the failure this project already hit once ("read a stale graph.json
+and reported it as fresh"). The spine therefore **asserts freshness instead of
+assuming it** (§3.2). Verified beats prevented.
+
+Per-run output isolation (an `outputRoot()` sweep over those components) stays
+available as its own later change. It buys concurrent runs; P0 doesn't need them.
+
+### 3.2 Acquire's freshness assertion
+
+After content-extractor exits 0, acquire reads
+`output/content-extraction-index.json` and **aborts** unless:
+
+- `generatedAt` is from this run (2s slack for write-time skew), and
+- the `crawler` source reports `ok` — a run against a URL whose crawl silently
+  failed would otherwise report on a previous run's application.
+
+A non-crawler source that failed is a survivable loss of one perspective:
+`markDegraded()` records it, acquire continues, and the report's gap section
+discloses it. A **skipped** source (no input for it — e.g. no codebase) is not
+a degradation and is not reported as one.
 
 ## 4. The checkpoint (the one human gate)
 

@@ -2,15 +2,18 @@
 // testo — the testing-harness CLI.
 //
 // Architecture: testo is just the user-facing seam. Each subcommand
-// hands work off to one layer. Today only `scan` is wired; later
-// commands (`plan`, `generate`, `run`, `report`) will map onto the
-// other architecture-diagram boxes.
+// hands work off to one layer — except `run`, which is the product
+// entrypoint and conducts all of them in sequence.
 //
-//   testo scan        → context-layer       (content extraction)
-//   testo plan        → generation-layer    (test plan creator)     [planned]
-//   testo generate    → generation-layer    (test script generator) [planned]
-//   testo run         → execution-layer     (test executor)         [planned]
-//   testo report      → execution-layer     (report generator)      [planned]
+//   testo run         → the whole pipeline, gated on one human approval,
+//                       ending in a report. This is the deliverable.
+//                       (spine: interfaces/cli/_lib/spine/)
+//   testo scan        → context-layer       (content extraction only)
+//   testo ask         → agentic-harness     (one-off agent call)
+//   testo generate    → generation-layer    (test script generator)
+//
+// `scan` and `generate` remain the dev tools for driving one stage at a
+// time; `run` is what you point at an app when you want the report.
 //
 // No options parsed by the top-level — each subcommand owns its own
 // flags. This keeps the dispatch layer trivial and lets subcommands
@@ -35,6 +38,10 @@ if (envResult.found && envResult.loaded > 0 && process.env.TESTO_VERBOSE) {
 // ── subcommand registry ────────────────────────────────────────────────────
 
 const COMMANDS = {
+  run: {
+    description: 'Audit an app end to end and report: crawl → understand → plan → (you approve) → generate → execute → report.',
+    run: path.join(REPO_ROOT, 'interfaces', 'cli', 'commands', 'run.mjs'),
+  },
   scan: {
     description: 'Discover everything we can about a target: crawl the live app, walk the codebase, extract per-framework facts.',
     run: path.join(REPO_ROOT, 'interfaces', 'cli', 'commands', 'scan.mjs'),
