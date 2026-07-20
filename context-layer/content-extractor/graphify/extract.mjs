@@ -1,9 +1,9 @@
-// Graphify source extractor — thin wrapper around scripts/graphify/.
+// Graphify source extractor — thin wrapper around context-layer/content-extractor/graphify/.
 //
 // Shells out to the existing graphify tool (LLM-enriched code knowledge
 // graph) against TARGET_CODEBASE, then emits a normalized source-bundle
-// JSON at output/sources/graphify.json that points at the produced
-// graph.json + carries provenance (DiscoveryTier=graph_extracted).
+// JSON at output/graphify/bundle.json that points at the produced
+// graph.json.
 //
 // The hand-rolled deterministic Python AST extractor (python-ast/) is a
 // SEPARATE auto-discovered source now — this wrapper no longer runs it.
@@ -16,8 +16,6 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-
-import { provenance, DiscoveryTier } from '../../../knowledge-base/schema.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
@@ -36,8 +34,10 @@ if (!fs.existsSync(TARGET_CODEBASE)) {
 // GRAPH_TREE.html, etc.) so all graphify-produced output is in one
 // folder for the indexer + downstream consumers to read from.
 const OUT_DIR = path.join(REPO_ROOT, 'output', 'graphify');
-const GRAPHIFY_DIR = path.join(REPO_ROOT, 'scripts', 'graphify');
-const AGENTIC_HARNESS_BIN = path.join(REPO_ROOT, 'infrastructure', 'agentic-harness', 'bin', 'call_tool.py');
+// The graphify harness tool lives under testo/harness/ now; this adapter just
+// invokes it via call_tool.py on the shared _lib venv.
+const HARNESS_PY = path.join(REPO_ROOT, 'context-layer', 'content-extractor', '_lib', '.venv', 'bin', 'python');
+const AGENTIC_HARNESS_BIN = path.join(REPO_ROOT, 'testo', 'harness', 'bin', 'call_tool.py');
 const GRAPHIFY_OUT = process.env.GRAPHIFY_OUT_DIR
   || path.join(REPO_ROOT, 'output', 'graphify');
 
@@ -64,7 +64,7 @@ let ok = false;
 let error = null;
 try {
   // Route through the agentic-harness service rather than calling
-  // scripts/graphify/tool.py directly. The service owns LLM backend
+  // testo/harness/agentic_harness/tools/graphify/tool.py directly. The service owns LLM backend
   // selection + the direct-vs-agent split.
   const argv = [
     AGENTIC_HARNESS_BIN,
@@ -78,7 +78,7 @@ try {
     argv.push('--prompt', `Run graphify on ${TARGET_CODEBASE}`);
   }
   execFileSync(
-    path.join(GRAPHIFY_DIR, '.venv', 'bin', 'python'),
+    HARNESS_PY,
     argv,
     {
       cwd: REPO_ROOT,
@@ -117,8 +117,6 @@ if (fs.existsSync(graphPath)) {
 const edgesArr = graph?.links ?? graph?.edges ?? [];
 const bundle = {
   sourceId: 'graphify',
-  discoveryTier: DiscoveryTier.GRAPH_EXTRACTED,
-  confidence: 0.65,
   extractedAt: new Date().toISOString(),
   extractedBy: 'context-layer/content-extractor/graphify/extract.mjs',
   target: TARGET_CODEBASE,
@@ -131,11 +129,6 @@ const bundle = {
     edges: edgesArr.length,
     hyperedges: graph.hyperedges?.length ?? 0,
   } : null,
-  provenance: provenance({
-    sourceId: 'graphify',
-    tier: DiscoveryTier.GRAPH_EXTRACTED,
-    extractedBy: 'graphify',
-  }),
 };
 
 const outFile = path.join(OUT_DIR, 'bundle.json');

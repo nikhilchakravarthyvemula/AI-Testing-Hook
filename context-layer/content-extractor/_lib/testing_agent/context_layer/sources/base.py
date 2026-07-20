@@ -58,7 +58,7 @@ class SourceKind(StrEnum):
 
 
 class ExtractorError(FrozenModel):
-    """A framework-extractor failure captured inside a source's `run()`.
+    """A framework-detector failure captured inside a source's `run()`.
 
     Sources catch per-file / per-extractor exceptions and record them
     here so one bad extractor never kills a run.

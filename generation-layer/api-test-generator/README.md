@@ -60,7 +60,7 @@ class ApiTestGeneratorResult(BaseModel):
 Via the skill register CLI (internal):
 
 ```bash
-./scripts/graphify/.venv/bin/python infrastructure/skill-register/bin/call_skill.py \
+./context-layer/content-extractor/graphify/.venv/bin/python testo/skill-register/bin/call_skill.py \
    api-test-generator \
    --apis_json output/indexed_output/apis.json \
    --login_email admin@example.com \

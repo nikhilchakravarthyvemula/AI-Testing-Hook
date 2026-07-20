@@ -1,31 +1,30 @@
-// Crawler source extractor — thin wrapper around scripts/crawler/.
+// Crawler source extractor — thin wrapper around context-layer/content-extractor/crawler/.
 //
 // Runs the existing crawler with whatever env vars are set, then reads its
 // outputs (routes.json, pages.json, click-graph.json) and emits a
-// normalized source-bundle JSON at output/sources/crawler.json carrying
-// provenance (DiscoveryTier=live_observed, confidence=0.95).
+// normalized source-bundle JSON at output/crawler/bundle.json consumed
+// by the indexer.
 //
 // Semantic source id is "crawler" (matches the folder name and the
-// run.mjs auto-discovery convention). The Knowledge Base layer maps it
-// to the architecture-diagram bucket "Live Links".
+// run.mjs auto-discovery convention).
 //
-// The crawler itself stays put at scripts/crawler/ — we just shell out to it.
+// The crawler engine now lives alongside this adapter (moved out of scripts/) — we just shell out to it.
 
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { provenance, DiscoveryTier } from '../../../knowledge-base/schema.mjs';
-import { adviseOn } from '../../../scripts/crawler/llm-advisor/index.mjs';
+import { adviseOn } from './llm-advisor/index.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 
-const CRAWLER_DIR = path.join(REPO_ROOT, 'scripts', 'crawler');
+// The crawler engine now lives alongside this adapter (moved out of scripts/).
+const CRAWLER_DIR = __dirname;
 const CRAWLER_OUT = path.join(REPO_ROOT, 'output', 'crawler');
 // Crawler-specific output folder. The crawler subsystem already writes
-// raw data + reports under output/crawler/{data,reports}/ via scripts/crawler;
+// raw data + reports under output/crawler/{data,reports}/ via context-layer/content-extractor/crawler;
 // the bundle.json sits alongside those as the "what the indexer reads".
 const OUT_DIR = path.join(REPO_ROOT, 'output', 'crawler');
 const OUT_FILE = path.join(OUT_DIR, 'bundle.json');
@@ -65,7 +64,7 @@ async function main() {
   await annotateClickableIntents(pages.pages ?? []);
 
   const bundle = {
-    ...provenanceShell(),
+    ...bundleMeta(),
     target: { baseUrl: routes?.summary?.origins?.[0] ?? null },
     stats: {
       endpoints: routes.endpoints?.length ?? 0,
@@ -248,20 +247,12 @@ function stripIndex(intent) {
   return rest;
 }
 
-function provenanceShell() {
-  // Attach a provenance block to the bundle itself (not per-fact — the source's
-  // own provenance applies to everything in facts unless overridden).
+function bundleMeta() {
+  // Basic metadata stamped on the bundle itself (not per-fact).
   return {
     sourceId: 'crawler',
-    discoveryTier: DiscoveryTier.LIVE_OBSERVED,
-    confidence: 0.95,
     extractedAt: new Date().toISOString(),
     extractedBy: 'context-layer/content-extractor/crawler/extract.mjs',
-    provenance: provenance({
-      sourceId: 'crawler',
-      tier: DiscoveryTier.LIVE_OBSERVED,
-      extractedBy: 'crawler',
-    }),
   };
 }
 

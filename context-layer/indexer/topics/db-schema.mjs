@@ -1,7 +1,8 @@
 // Topic: db-schema — relational tables + columns + relationships.
 //
-// Source: sources.dbSchema (the merged bundle written by the top-level
-// content-extractor/db-schema/ orchestrator). That bundle already
+// Source: sources.dbSchema (the merged bundle written by the db-schema
+// code-extractor's orchestrator, content-extractor/code-extractors/db-schema/).
+// That bundle already
 // merged deterministic + LLM findings, with `_sources` on each table
 // recording who saw it.
 //

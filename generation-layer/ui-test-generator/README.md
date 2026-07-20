@@ -25,7 +25,7 @@ node generation-layer/ui-test-generator/gen.mjs scenario.json --url https://stag
 - `type: "storageState"` (default for SSO targets like superalign): reuses a session saved by
   the repo's one-time interactive login. Do it once:
   ```bash
-  cd scripts/crawler && npm run login      # headed browser → output/crawler/auth-state.json
+  cd context-layer/content-extractor/crawler && npm run login      # headed browser → output/crawler/auth-state.json
   ```
   Then the test loads that session and runs authenticated. (Google-SSO logins can't be driven
   headlessly, which is why this exists.)

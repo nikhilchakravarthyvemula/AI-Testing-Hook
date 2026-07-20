@@ -1,7 +1,7 @@
 # Feedback
 
-The "results inform KB" arrow on the architecture diagram.
+The "results inform the next run" arrow on the architecture diagram.
 
-`results-to-kb.mjs` — after `playwright test` finishes, parse the JSON
-reporter output and append results to `knowledge.json#facts.testRuns[]`.
+`results-to-feedback.mjs` — after `playwright test` finishes, parse the JSON
+reporter output and append results under `output/execution/` (future: Postgres via the store-relational skill — docs/spec-10).
 Next pipeline run sees what passed/failed last time.

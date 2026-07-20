@@ -1,0 +1,46 @@
+# Package metadata for the agentic-harness service layer.
+#
+# Not currently published — this file exists so:
+#   * tooling (black, ruff, pytest) finds project config in one place
+#   * future `pip install -e testo/harness` works
+#
+# The runtime venv is `context-layer/content-extractor/graphify/.venv` (which has openharness
+# installed). When/if we extract this package, point pip there.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentic-harness"
+version = "0.1.0"
+description = "LLM tool-calling layer for the testing-harness project. Wraps OpenHarness."
+requires-python = ">=3.10"
+dependencies = [
+    "openharness-ai>=0.1.9",
+    "pydantic>=2.7",
+]
+
+[tool.setuptools.packages.find]
+include = ["agentic_harness*"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",   # pycodestyle + pyflakes
+    "I",             # isort
+    "B",             # bugbear
+    "UP",            # pyupgrade
+    "SIM",           # simplify
+    "TCH",           # type-checking
+]
+ignore = [
+    "E501",   # line-too-long — black handles wrap, ruff just warns
+]

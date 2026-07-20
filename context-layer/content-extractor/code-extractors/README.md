@@ -2,7 +2,7 @@
 
 Per-framework deterministic extractors. Each subfolder is one extractor;
 the orchestrator runs the subset that matches frameworks detected by
-`../framework-extractor/`.
+`../framework-detector/`.
 
 ## Layout
 
@@ -44,7 +44,7 @@ code-extractors/
 
 ## How extractors get picked
 
-1. The orchestrator runs `framework-extractor/` first when `--codebase`
+1. The orchestrator runs `framework-detector/` first when `--codebase`
    is set. That writes `output/sources/framework-detection.json` with
    a `recommendedExtractors` list.
 2. The orchestrator reads that list and runs only matching extractors.
@@ -69,7 +69,7 @@ code-extractors/
    ),
    ```
 3. That's it — the orchestrator auto-discovers the folder and the
-   framework-extractor reads the catalog to decide when to run it.
+   framework-detector reads the catalog to decide when to run it.
 
 ## Interface
 

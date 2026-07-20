@@ -35,7 +35,7 @@ class ICodeExtractor(Protocol):
                          are even opened.
         supported_frameworks
                          Framework ids this extractor produces facts
-                         for. The framework-extractor uses this set to
+                         for. The framework-detector uses this set to
                          decide whether to run the extractor. e.g.
                          ["fastapi"] for python_fastapi, ["nextjs"] for
                          nextjs_app.

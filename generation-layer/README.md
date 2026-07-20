@@ -7,8 +7,8 @@
 | `perf-test-generator/` | `scenario.json` → JMeter `.jmx` load plan + run script + `.jtl` parser. Standalone Node script. | ✅ |
 | `allure-reporter/` | Consolidates API + UI + Perf results into one **Allure** report (pass/fail + reasons, per-step screenshots, route/API/object timing). Standalone Node script. | ✅ |
 | `pdf-reporter/` | Consolidates API + UI + Perf into a single shareable **PDF** (cover, API table + reasons, UI steps with embedded screenshots, perf timing). Headless `page.pdf()`, no new dep. | ✅ |
-| `test-plan-creator/` | Reads knowledge-base + gap-analyzer output, emits explicit `test-plan.json`. Until it exists, `scenario.json` (repo root) is the hand-authored stand-in consumed by the UI/perf generators. | planned |
-| `test-script-generator/` | Emits runnable Playwright .spec.mjs files. Today: in scripts/crawler/generator/. | 🚧 |
+| `test-plan-creator/` | Reads output/indexed_output + gap-analyzer output, emits explicit `test-plan.json`. Until it exists, `scenario.json` (repo root) is the hand-authored stand-in consumed by the UI/perf generators. | planned |
+| `test-script-generator/` | Emits runnable Playwright .spec.mjs files. Today: in context-layer/content-extractor/crawler/generator/. | 🚧 |
 | `mock-data-creator/` | Field-type defaults + per-app config overrides | planned |
 | `validator/` | ESLint + parse-check + diff vs previous generation | planned |
 

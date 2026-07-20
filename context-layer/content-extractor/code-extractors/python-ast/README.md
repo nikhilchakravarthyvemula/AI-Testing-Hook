@@ -58,7 +58,7 @@ For each `.py` file in the target:
 ## Usage
 
 ```bash
-cd knowledge-sources/codebase/deterministic
+cd context-layer/content-extractor/code-extractors/python-ast
 python3 extract.py /path/to/target/codebase
 # → writes output/sources/codebase-ast.json
 ```

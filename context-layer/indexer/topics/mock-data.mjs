@@ -1,5 +1,5 @@
 // Topic: mock-data — real request/response samples observed by the crawler,
-// distilled into per-endpoint records by the mock-data-extractor.
+// distilled into per-endpoint records by the mock-data.
 //
 // Source: sources.mockData (output/mock-data/bundle.json).
 //

@@ -2,27 +2,27 @@
 //
 // Pipeline runs in dependency stages, with sources INSIDE each stage
 // running in parallel. The longest-running source (crawler) sets the
-// stage-1 wall-clock — graphify, db-schema, and framework-extractor
+// stage-1 wall-clock — graphify, db-schema, and framework-detector
 // finish "for free" alongside it.
 //
 //   Stage 1 (parallel, independent inputs):
-//     framework-extractor   needs codebase only      → ~1s
+//     framework-detector   needs codebase only      → ~1s
 //     crawler               needs target URL         → ~5-10 min (LLM intent-extract)
 //     graphify              needs codebase only      → ~30-60s
 //     db-schema             needs codebase only      → ~30s deterministic (+ LLM if DBSCHEMA_LLM=1)
 //
 //   Stage 2 (parallel, after crawler):
-//     mock-data-extractor   reads crawler bundle     → ~1s
-//     openapi-extractor     uses observed origins    → ~1s
+//     mock-data   reads crawler bundle     → ~1s
+//     openapi-probe     uses observed origins    → ~1s
 //
-//   Stage 3 (parallel, after framework-extractor):
-//     code-extractors/<name>   only those framework-extractor recommended
+//   Stage 3 (parallel, after framework-detector):
+//     code-extractors/<name>   only those framework-detector recommended
 //                              (each ~300-400ms, run concurrently)
 //
 // Toggles:
 //   ONLY=python-fastapi,nextjs-app       run only these code-extractors
 //   SKIP=crawler,graphify                skip these sources entirely
-//   TARGET_CODEBASE=/abs/path            enables graphify + framework-extractor + db-schema + code-extractors
+//   TARGET_CODEBASE=/abs/path            enables graphify + framework-detector + db-schema + code-extractors
 //   SKIP_FRAMEWORK_DETECTION=1           force-run ALL code-extractors regardless of detection
 //   PARALLEL=0                           force serial execution (debugging / single-thread machines)
 //   MAX_PARALLEL=N                       cap concurrent subprocesses (default: stage-defined)
@@ -44,25 +44,28 @@ const VENV_PY = path.join(__dirname, '_lib', '.venv', 'bin', 'python');
 const STAGES = [
   {
     name: 'stage 1 — independent primary sources',
-    primary: ['framework-extractor', 'crawler', 'graphify', 'db-schema'],
+    primary: ['framework-detector', 'crawler', 'graphify'],
   },
   {
     name: 'stage 2 — depends on crawler',
-    primary: ['mock-data-extractor', 'openapi-extractor'],
+    primary: ['mock-data', 'openapi-probe'],
   },
   {
-    name: 'stage 3 — code-extractors (depend on framework-extractor)',
+    name: 'stage 3 — code-extractors (depend on framework-detector)',
+    // Includes db-schema, which now lives under code-extractors/ and is
+    // recommended by framework detection (catalog wildcard `*any`).
     codeExtractors: true,
   },
 ];
 
+// Gates apply to PRIMARY sources only. Code-extractors (incl. db-schema) are
+// gated on TARGET_CODEBASE collectively by the stage-3 guard in _decideCodeExtractors.
 const GATES = {
-  crawler:               null,
-  'mock-data-extractor': null,
-  'openapi-extractor':   null,
-  graphify:              'TARGET_CODEBASE',
-  'framework-extractor': 'TARGET_CODEBASE',
-  'db-schema':           'TARGET_CODEBASE',
+  crawler:              null,
+  'mock-data':          null,
+  'openapi-probe':      null,
+  graphify:             'TARGET_CODEBASE',
+  'framework-detector': 'TARGET_CODEBASE',
 };
 
 const ONLY = (process.env.ONLY ?? '').split(',').filter(Boolean);
@@ -112,7 +115,7 @@ function discoverSources() {
 
 
 function readRecommendedExtractors() {
-  const detection = path.join(REPO_ROOT, 'output', 'code-extractors', 'framework-detection.json');
+  const detection = path.join(REPO_ROOT, 'output', 'framework-detector', 'framework-detection.json');
   if (!fs.existsSync(detection)) return null;
   try {
     const data = JSON.parse(fs.readFileSync(detection, 'utf8'));
@@ -155,15 +158,14 @@ const RUNS = [];   // result records, populated by runSource
 //   - SKIP_WIPE=1 opts out (for debugging cross-run diffs).
 const WIPE_DIRS = [
   'output/mock-data',
-  'output/openapi',
+  'output/openapi-probe',
   'output/graphify',
   'output/graphify_graph',
   'output/db-schema',
   'output/code-extractors',
+  'output/framework-detector',
 ];
-const WIPE_FILES = [
-  'output/framework-detection.json',
-];
+const WIPE_FILES = [];
 if ((process.env.SKIP_WIPE ?? '0') !== '1') {
   let wiped = 0;
   for (const rel of WIPE_DIRS) {
@@ -226,7 +228,7 @@ function _decideCodeExtractors() {
 
   // Code-extractors parse a *codebase*. With no TARGET_CODEBASE there is
   // nothing for them to read, so skip the entire stage. This also makes a
-  // stale output/code-extractors/framework-detection.json (left behind by a
+  // stale output/framework-detector/framework-detection.json (left behind by a
   // prior, codebase-backed run) harmless: without this guard it would
   // "recommend" extractors for a target that has no code, which then run
   // against nothing (empty output) or error outright (e.g. python-ast exit 2).
@@ -245,7 +247,7 @@ function _decideCodeExtractors() {
     recommended = readRecommendedExtractors();
     if (recommended) {
       console.log(
-        `\n[content-extractor] framework-extractor recommended ` +
+        `\n[content-extractor] framework-detector recommended ` +
         `${recommended.size}/${all.length} code-extractors: ${[...recommended].join(', ')}`
       );
     }

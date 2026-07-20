@@ -42,7 +42,7 @@
  */
 
 
-// ── tier → base confidence (mirrors knowledge-base/schema.mjs) ─────────────
+// ── tier → base confidence (tier → base confidence; owned here) ─────────────
 
 export const TIER_CONFIDENCE = Object.freeze({
   live_observed:   0.95,

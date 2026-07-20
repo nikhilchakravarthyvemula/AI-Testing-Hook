@@ -1,10 +1,10 @@
-// Topic: openapi — live-served API spec parsed by the openapi-extractor.
+// Topic: openapi — live-served API spec parsed by the openapi-probe.
 //
 // One IndexedItem per endpoint. Carries the full resolved request schema,
 // per-status response schemas, security, parameters — everything the
 // generator needs to build a real body and assert the response.
 //
-// Source: sources.openapiSpec (output/openapi/bundle.json).
+// Source: sources.openapiSpec (output/openapi-probe/bundle.json).
 //
 // Consumers:
 //   * api-test-generator → request body synthesis from JSON Schema

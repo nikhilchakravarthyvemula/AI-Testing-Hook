@@ -377,7 +377,7 @@ def main():
         "discoveryTier": "ast",
         "confidence": 0.90,
         "extractedAt": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "extractedBy": "knowledge-sources/codebase/deterministic/extract.py",
+        "extractedBy": "context-layer/content-extractor/code-extractors/python-ast/extract.py",
         "target": str(TARGET),
         "stats": {
             "filesScanned": len(py_files),

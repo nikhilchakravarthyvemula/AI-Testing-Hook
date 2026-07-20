@@ -8,7 +8,7 @@ Public surface:
   * `ICodeExtractor`   — Protocol every extractor wrapper satisfies.
   * `ExtractionBundle` — shared model for "what one extractor produces".
   * `EXTRACTOR_CATALOG`— name → (framework, language, supported_signals) map.
-                         The framework-extractor reads this to pick which
+                         The framework-detector reads this to pick which
                          extractors apply to a detected codebase.
 """
 

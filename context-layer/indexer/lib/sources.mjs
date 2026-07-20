@@ -48,7 +48,7 @@ export function loadAllSources(repoRoot) {
   if (out.mockData?.target) out.target ??= out.mockData.target;
 
   // openapi-spec — live-served OpenAPI/Swagger spec (parsed + $refs resolved).
-  out.openapiSpec = _safeReadJson(path.join(repoRoot, 'output', 'openapi', 'bundle.json'));
+  out.openapiSpec = _safeReadJson(path.join(repoRoot, 'output', 'openapi-probe', 'bundle.json'));
   if (out.openapiSpec?.target) out.target ??= out.openapiSpec.target;
 
   // graphify — both the bundle (small) and the actual graph (big)

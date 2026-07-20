@@ -123,7 +123,7 @@ class ApiTestGeneratorSkill:
         apis_path  = _resolve(repo_root, args.apis_json)
         db_path    = _resolve(repo_root, args.db_schema_json)
         mock_path    = repo_root / "output" / "mock-data" / "bundle.json"
-        openapi_path = repo_root / "output" / "openapi"   / "bundle.json"
+        openapi_path = repo_root / "output" / "openapi-probe" / "bundle.json"
         out_dir    = _resolve(repo_root, args.output_dir)
         curls_dir  = out_dir / "curls"
         runs_dir   = out_dir / "runs"   # per-test request+response artifacts

@@ -1,6 +1,6 @@
 """EXTRACTOR_CATALOG — what each code-extractor handles.
 
-The framework-extractor uses this to decide which extractors to run
+The framework-detector uses this to decide which extractors to run
 after detecting a codebase's languages/frameworks. Without the catalog
 the orchestrator can't make a principled "this extractor applies" call.
 
@@ -25,8 +25,8 @@ class ExtractorMetadata:
                         the wrapper's source_id.
     language            Primary language the extractor parses.
     frameworks          Framework ids this extractor handles. The
-                        framework-extractor matches against these.
-    file_extensions     Hint for the framework-extractor: if NONE of
+                        framework-detector matches against these.
+    file_extensions     Hint for the framework-detector: if NONE of
                         these extensions are present in the target,
                         the extractor can be skipped without even
                         reading its supports() implementation.
@@ -50,10 +50,19 @@ EXTRACTOR_CATALOG: dict[str, ExtractorMetadata] = {
         file_extensions=(".py",),
         summary="Hand-rolled Python AST extractor — endpoints, classes, models, cross-file router prefixes.",
     ),
-    # NOTE: db-schema is no longer a code-extractor — it's promoted to a
-    # top-level primary source under content-extractor/db-schema/. Runs
-    # via its own orchestrator (gated on TARGET_CODEBASE) alongside
-    # crawler + graphify. See content-extractor/db-schema/extract.py.
+    # db-schema is special: it's a code-extractor (static SQLAlchemy AST +
+    # opt-in LLM over ORM/migration/SQL files) but not framework-specific, so
+    # it uses the `*any` wildcard — recommended whenever any language is
+    # detected. Its own orchestrator (code-extractors/db-schema/extract.py)
+    # runs two sub-extractors and writes output/db-schema/bundle.json (a
+    # dedicated indexer slot), not the usual output/code-extractors/<id>.json.
+    "db-schema": ExtractorMetadata(
+        name="db-schema",
+        language="sql",
+        frameworks=("*any",),
+        file_extensions=(".py", ".sql", ".prisma"),
+        summary="Database schema from SQLAlchemy AST (+ opt-in LLM for Django/Prisma/TypeORM/raw SQL). Set DBSCHEMA_LLM=1 for the LLM pass.",
+    ),
 
     "python-fastapi": ExtractorMetadata(
         name="python-fastapi", language="python",

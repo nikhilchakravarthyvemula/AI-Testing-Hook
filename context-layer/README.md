@@ -22,8 +22,8 @@ context-layer/content-extractor/
 ├── _lib/                       shared library — testing-agent extractor port + venv
 ├── run.mjs                     orchestrator (auto-discovery)
 │
-├── crawler/                    wraps scripts/crawler  (live-app discovery)
-├── graphify/                   wraps scripts/graphify (LLM-enriched code graph)
+├── crawler/                    wraps context-layer/content-extractor/crawler  (live-app discovery)
+├── graphify/                   wraps context-layer/content-extractor/graphify (LLM-enriched code graph)
 ├── python-ast/                 hand-rolled FastAPI/Flask AST extractor
 │
 ├── python-fastapi/             ╮

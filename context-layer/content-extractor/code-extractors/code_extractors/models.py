@@ -51,7 +51,7 @@ class ExtractionBundle(BaseModel):
     The fields are deliberately permissive (`list[Any]`) at this layer
     so each framework can carry richer detail in its own facts without
     forcing every other extractor to know about it. Downstream
-    consumers (knowledge-base/synthesizer) re-type as needed.
+    consumers (indexer/synthesizer) re-type as needed.
     """
 
     model_config = ConfigDict(extra="forbid")

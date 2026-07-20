@@ -1,3 +1,13 @@
+# The single shared venv for the whole harness + content-extractor Python stack.
+# Built at _lib/.venv and used by: run.mjs code-extractors, db-schema, the testo
+# REPL, skill-register, ask.py/call_tool.py, and the graphify tool.
+#
+# openharness-ai pulls in textual/mcp/anthropic/prompt_toolkit transitively.
+# rich is >=14.2 because textual (via openharness) requires it — the old
+# _lib pin of rich<14 was a conservative self-pin, not a real constraint;
+# testing_agent's rich usage (Console/Table/markup) is compatible with rich 15.
+openharness-ai
+openai
 pydantic>=2.7,<3
 pyyaml>=6.0,<7
-rich>=13.0,<14
+rich>=14.2

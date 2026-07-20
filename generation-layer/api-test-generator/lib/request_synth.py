@@ -107,7 +107,7 @@ def synthesize_body(
         real bodies the frontend actually sent and the backend accepted.
 
     `openapi`   — dict keyed by `<METHOD>:<path>`, values are entries from
-        `output/openapi/bundle.json#facts.endpoints`. Second-strongest:
+        `output/openapi-probe/bundle.json#facts.endpoints`. Second-strongest:
         the published request schema with $refs resolved. Generic across
         any framework that serves OpenAPI/Swagger.
     """
@@ -346,7 +346,7 @@ def load_mock_data_index(mock_data_bundle_path) -> dict[str, dict]:
 
 
 def load_openapi_index(openapi_bundle_path) -> dict[str, dict]:
-    """Load `output/openapi/bundle.json` into a `METHOD:path → entry` dict.
+    """Load `output/openapi-probe/bundle.json` into a `METHOD:path → entry` dict.
     Returns {} when the bundle is missing — fallback behavior is unchanged."""
     return _load_endpoint_index(openapi_bundle_path)
 

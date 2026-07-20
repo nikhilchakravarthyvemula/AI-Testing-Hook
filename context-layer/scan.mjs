@@ -2,7 +2,7 @@
 //
 // The CLI hands every "scan" call off to this file. The context layer
 // owns the sequence of sub-components that turn raw inputs into
-// knowledge-base material.
+// indexed context material (output/indexed_output).
 //
 // Today only the content-extractor exists. As the other sub-components
 // land (gap-analyzer, knowledge-synthesizer, feature-extractor,
