@@ -1,6 +1,10 @@
 # P0-05 — Test-Plan-Creator (S1) · SPEC
 
-**Status:** Draft v1.0 (for review)
+**Status:** v1.1 — **IMPLEMENTED 2026-07-20** (`generation-layer/test-plan-creator/`:
+`create.mjs` + `lib/{mutation,schema,assemble,template}.mjs`; wired as the spine
+`plan` stage). `npm run test:plan` — 10 unit tests (injected `completeFn`) + one
+opt-in live-engine test (`ENGINE_LIVE_TEST=1`, §6). All four acceptance criteria
+verified — see §5.
 **Depends on:** p0-03 (store), p0-02a (connector), p0-01 (checkpoint consumes
 its output)
 **Consumed by:** the checkpoint (human), p0-06 (approved slices)
@@ -56,11 +60,42 @@ remaining budget so the human approves cost, not just content.
 
 ## 5. Acceptance
 
-1. Against the logtrim store with live engine: plan validates against
-   p0-00 §6; every scenario's targets resolve in the store; mutation flags
-   correct on a hand-checked sample (all POST/PUT/DELETE flagged).
-2. Mock engine, no fixtures: full template plan appears, same schema,
-   `source: "template"`.
-3. A scenario inventing an unknown endpoint is dropped and counted.
-4. Checkpoint summary (p0-01 §4) renders correctly from a real plan: feature
-   count, scenario counts, mutation count, estimate.
+1. ✅ **Live engine.** `ENGINE_LIVE_TEST=1` (§6, `create-live.test.mjs`) makes a
+   real S1 call through the actual `SCENARIOS` schema + prompt against a live
+   `claude` model: the plan validates against p0-00 §6, every surviving
+   scenario's targets resolve in the store, and the mutation flag is asserted
+   correct on the real output (any write-method target ⇒ `mutation: true`). First
+   live run: 6 scenarios for one feature, `source: "llm"`, one S1 ledger entry,
+   ~36 s (the `claude -p` scaffolding overhead, p0-02 OQ-2).
+2. ✅ **Template fallback.** Mock engine, no fixtures → full template plan, same
+   schema, `source: "template"` (`create.test.mjs`, and end-to-end through the
+   real spine `plan`→`checkpoint` stages).
+3. ✅ **Hallucination guard.** A scenario inventing an unknown endpoint is dropped
+   and counted in `stats.dropped.hallucinated`.
+4. ✅ **Checkpoint summary** renders from a real plan (feature/scenario/mutation
+   counts + estimate), asserted against `renderSummary` (p0-01 §4).
+
+## 6. What we built — deviations & notes
+
+- **Module split.** `create.mjs` orchestrates; `lib/mutation.mjs` (the fail-safe
+  flag), `lib/schema.mjs` (`SCENARIOS` + prompt), `lib/assemble.mjs` (the
+  deterministic post-processing both paths share), `lib/template.mjs` (§3).
+  `createPlan(ctx)` mirrors C3's `buildStore` signature — `{ ok, stats, degraded }`,
+  injectable `completeFn` (the same test seam `s2.mjs` uses) — so the spine wires
+  it exactly like the store stage.
+- **Spec-vs-reality: `source` is plan-level, not per-feature.** §3 says a
+  degraded feature's plan "gets `source: template` for that feature", but the
+  binding contract the checkpoint validates (`plan-schema.mjs` / p0-00 §6) has
+  only a **plan-level** `source`. Resolved: plan `source = "template"` iff a
+  **full** engine outage (every feature fell back), else `"llm"`; each feature
+  **also** carries its own `source` field (the validator permits extra keys) and
+  every fallback appends one S1 `degraded` entry. So a partial outage stays an
+  `"llm"` plan whose per-feature provenance and degradations are still recorded
+  and disclosed. Acceptance 2 (full outage ⇒ `"template"`) is unaffected.
+- **Verification parity closed late.** The opt-in live test (acceptance 1) was
+  added and run *after* the initial landing — the unit suite alone would have
+  left §1 asserted-but-unproven, out of step with p0-02/p0-03/p0-04. Recorded
+  here rather than left silent.
+- **Still open — OQ-1 (per-use-case model).** Flagged in p0-02 §6 as due at C5.
+  Not wired: S1 uses the run's default provider/model. Revisit if S1 scenario
+  quality warrants a stronger model than the run default.

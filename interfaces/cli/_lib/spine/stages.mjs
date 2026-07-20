@@ -30,6 +30,7 @@ import { spawnSync } from 'node:child_process';
 import { stageStart, stageEnd, markDegraded, readRun, updateRun } from './workspace.mjs';
 import { runCheckpoint } from './checkpoint.mjs';
 import { buildStore } from '../../../../context-layer/knowledge-store/build.mjs';
+import { createPlan } from '../../../../generation-layer/test-plan-creator/create.mjs';
 
 // ── the registry ───────────────────────────────────────────────────────────
 
@@ -54,9 +55,9 @@ export const STAGES = [
   },
   {
     name: 'plan',
-    failMode: 'degrade',          // template plan on failure (once C5 exists)
+    failMode: 'degrade',          // template plan on per-feature engine failure
     description: 'propose scenarios per feature (S1)',
-    run: notImplemented('p0-05', 'generation-layer/test-plan-creator/'),
+    run: plan,
   },
   {
     name: 'checkpoint',
@@ -317,6 +318,41 @@ async function store(ctx) {
   const s = result.stats;
   ctx.io.out(`  ✓ store: ${s.facts} facts, ${s.features} features, ${s.gaps} gaps ` +
     `(S2: ${s.s2Merges} merged / ${s.s2Skipped} unmerged of ${s.s2Candidates} candidates)`);
+  return { ok: true };
+}
+
+// ── plan ───────────────────────────────────────────────────────────────────
+
+async function plan(ctx) {
+  if (ctx.opts.dryRun) {
+    ctx.io.out('  (dry-run) create test plan from store/ (S1 per feature)');
+    return { ok: true };
+  }
+
+  const result = await createPlan({
+    workspace: ctx.dir,
+    runId: ctx.run.runId,
+    engine: {
+      provider: ctx.run.engine.provider,
+      maxRequests: ctx.run.budget.maxRequests,
+    },
+    log: (m) => ctx.io.out(`  ${m}`),
+  });
+
+  if (!result.ok) return { ok: false, reason: result.reason };
+
+  // A per-feature S1 fallback is a degradation, not a stage failure — the plan
+  // built fine; some features just carry template scenarios, which the report
+  // discloses. Same handling as the store stage's S2 fallback.
+  for (const d of result.degraded) markDegraded(ctx.dir, d);
+  if (result.degraded.length) ctx.run = readRun(ctx.dir);
+
+  const s = result.stats;
+  const drop = s.dropped.hallucinated + s.dropped.noTarget + s.dropped.duplicate;
+  ctx.io.out(`  ✓ plan: ${s.scenarios} scenario(s) across ${s.features} feature(s) ` +
+    `(${s.mutations} mutation)` +
+    (drop > 0 ? `; dropped ${s.dropped.hallucinated} hallucinated / ${s.dropped.duplicate} dup / ${s.dropped.noTarget} untargeted` : '') +
+    (s.degradedFeatures > 0 ? `; ${s.degradedFeatures} feature(s) templated` : ''));
   return { ok: true };
 }
 
