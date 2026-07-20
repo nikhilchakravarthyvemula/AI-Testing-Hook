@@ -12,7 +12,8 @@
     "test:spine": "node --test 'interfaces/cli/_lib/spine/*.test.mjs'",
     "test:engine": "node --test 'infrastructure/model-api-connector/*.test.mjs'",
     "test:store": "node --test 'context-layer/knowledge-store/**/*.test.mjs'",
-    "test": "npm run --silent test:spine && npm run --silent test:engine && npm run --silent test:store",
+    "test:mcp": "node --test 'context-layer/context-server/*.test.mjs'",
+    "test": "npm run --silent test:spine && npm run --silent test:engine && npm run --silent test:store && npm run --silent test:mcp",
     "login": "BASE_URL=$(node -p \"require('./scenario.json').baseUrl\") SEED_PATH=/ node scripts/crawler/login-once.mjs",
     "test:ui": "node generation-layer/ui-test-generator/gen.mjs scenario.json",
     "test:perf": "node generation-layer/perf-test-generator/gen.mjs scenario.json",
@@ -31,5 +32,8 @@
   },
   "workspaces": [
     "scripts/crawler"
-  ]
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  }
 }
