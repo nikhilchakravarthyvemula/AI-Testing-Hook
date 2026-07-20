@@ -141,11 +141,21 @@ manifest stays trustworthy by never passing through the model.
 ### 3.4 S4 (graphify enrichment) is a Python caller — needs a bridge
 
 graphify is Python; its S4 enrichment can't `import` the Node connector. Rather
-than reintroduce a Python engine path, S4 will route through a thin
+than reintroduce a Python engine path, S4 routes through a thin
 `bin/complete.mjs` CLI (a subprocess wrapper over `complete()`, so it inherits
-cache/ledger/budget). **Not built this turn** — it lands with the S4 re-route
-in C6 §5. Until then graphify keeps its existing LLM path; the raw-AST graph is
-the documented S4 fallback. *(Open follow-up, recorded in §6.)*
+cache/ledger/budget). **BUILT 2026-07-20** (OQ-5 closed) —
+`infrastructure/model-api-connector/bin/complete.mjs` (JSON-over-stdio: request
+in, `complete()` result out; exit 0 on any engine outcome, exit 2 only on a
+malformed call) + the reusable Python client
+`context-layer/content-extractor/graphify/s4_bridge.py` (`s4_complete(...)`, the
+`single_call("S4")` replacement). Verified `test:engine`, incl. a real
+`python3 → s4_bridge.py → node complete.mjs` round-trip that shares the cache
+(2nd call = hit), writes the ledger line, and honours the budget. **Consumer
+note:** graphify's own `QueryEngine` LLM path (`scripts/graphify/`, OpenHarness)
+is retired and uninstalled (no `.venv`), so the literal in-place swap has no live
+target today; the raw-AST graph (the `python-ast` extractor) is the active S4
+source. When graphify's semantic stage is revived it calls `s4_bridge` instead
+of constructing a `QueryEngine`. See p0-06 §8.
 
 ### 3.5 Ledger & budget
 

@@ -28,9 +28,10 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 import { stageStart, stageEnd, markDegraded, readRun, updateRun } from './workspace.mjs';
-import { runCheckpoint } from './checkpoint.mjs';
+import { runCheckpoint, verifyPlanHash } from './checkpoint.mjs';
 import { buildStore } from '../../../../context-layer/knowledge-store/build.mjs';
 import { createPlan } from '../../../../generation-layer/test-plan-creator/create.mjs';
+import { runGenerate } from '../../../../generation-layer/test-generator/generate.mjs';
 
 // ── the registry ───────────────────────────────────────────────────────────
 
@@ -67,9 +68,9 @@ export const STAGES = [
   },
   {
     name: 'generate',
-    failMode: 'degrade',
-    description: 'write tests per feature (A1)',
-    run: notImplemented('p0-06', 'the agent session + template fallback'),
+    failMode: 'abort',            // engine degradation is handled INSIDE the
+    description: 'write tests per feature (A1)',   // stage (template fallback);
+    run: generate,                // an ok:false here = a hard stop (bad gate)
   },
   {
     name: 'execute',
@@ -374,6 +375,46 @@ async function checkpoint(ctx) {
   ctx.run = readRun(ctx.dir);
   if (result.approved) return { ok: true };
   return { ok: false, declined: true, reason: result.reason };
+}
+
+// ── generate ───────────────────────────────────────────────────────────────
+
+async function generate(ctx) {
+  if (ctx.opts.dryRun) {
+    ctx.io.out('  (dry-run) run one agent session per feature slice (A1) + template fallback');
+    return { ok: true };
+  }
+
+  // The gate that makes the checkpoint mean something: the plan on disk must be
+  // byte-identical to the one the operator approved. A mismatch is a hard stop —
+  // never generate (and later execute) something a human never saw (p0-06 §1).
+  const gate = verifyPlanHash(ctx.dir, ctx.paths.planJson, readRun(ctx.dir));
+  if (!gate.ok) return { ok: false, reason: gate.reason };
+
+  const result = await runGenerate({
+    workspace: ctx.dir,
+    runId: ctx.run.runId,
+    engine: {
+      provider: ctx.run.engine.provider,
+      maxRequests: ctx.run.budget.maxRequests,
+    },
+    log: (m) => ctx.io.out(`  ${m}`),
+  });
+
+  if (!result.ok) return { ok: false, reason: result.reason };
+
+  // Per-slice template fallback is a degradation, not a stage failure — the
+  // manifest is complete either way; the report discloses what the LLM couldn't
+  // do. Same shape as the store/plan stages.
+  for (const d of result.degraded) markDegraded(ctx.dir, d);
+  if (result.degraded.length) ctx.run = readRun(ctx.dir);
+
+  const s = result.stats;
+  ctx.io.out(`  ✓ generate: ${s.generated} agent + ${s.templated} template of ${s.scenarios} scenario(s) ` +
+    `across ${s.features} feature(s)` +
+    (s.failed > 0 ? `; ${s.failed} failed-generation` : '') +
+    (s.slicesResumed > 0 ? `; ${s.slicesResumed} slice(s) resumed` : ''));
+  return { ok: true };
 }
 
 // ── placeholders (C3–C8) ───────────────────────────────────────────────────

@@ -1,9 +1,22 @@
 # P0-06 — Generation Stage (A1) · SPEC
 
-**Status:** Draft v1.0 (for review)
+**Status:** v1.1 — **IMPLEMENTED 2026-07-20** (`generation-layer/test-generator/`:
+`generate.mjs` + `lib/{slices,template-gen,validate,manifest}.mjs`; wired as the
+spine `generate` stage). `npm run test:generate` — 6 unit tests (injected
+`sessionFn`) + one opt-in live test (`ENGINE_LIVE_TEST=1`, §7). Acceptance 1, 3,
+4 covered by the unit suite; acceptance 2 (generation half) by the live test —
+see §6. **The S4 re-route (§5) is NOT built — see §8; it's a separate Python-island
+change deferred out of this landing.**
 **Depends on:** p0-02b (seam sessions), p0-04 (context-server), p0-05
 (approved plan), p0-01 (spine invokes it post-checkpoint)
 **Consumed by:** p0-07 (manifest + test files)
+
+> **Reconciliation (this spec predates OQ-4).** §2 below describes a Python
+> `agentic_harness` subprocess with exit codes 3/4/5. OQ-4 (p0-02, resolved
+> 2026-07-19) collapsed C2b to an **in-process Node `runSession()`** returning
+> `{ ok:false, error }` — no second runtime, no exit codes. The implementation
+> follows that real contract; the flow (slice → session → fallback → validate →
+> manifest) is otherwise exactly as specified. See §8 for the full delta.
 
 > The one agentic stage. For each feature slice of the approved plan, the
 > spine spawns one seam session (`agentic_harness.run_session`) whose agent
@@ -65,21 +78,82 @@ form. Files that fail: manifest entry flipped to `failed-generation`, file
 moved to `tests/_rejected/`, degradation note. Template-generated files pass
 through the same check.
 
-## 5. S4 re-route (rides along)
+## 5. S4 re-route (rides along) — bridge BUILT, consumer dormant
 
-graphify's enrichment call (acquire stage, only when codebase given) swaps
-`QueryEngine` → `agentic_harness.single_call("S4", …)` (p0-02b §3.4). Its
-fallback (raw AST graph) is graphify's existing no-LLM path. This is the
-entire S4 change — no new component.
+The mechanism this needed — a Python→Node bridge so graphify's enrichment call
+draws from the one connector's cache/ledger/budget — is **built** (p0-02 §3.4,
+OQ-5): `bin/complete.mjs` + the Python client `s4_bridge.py`
+(`s4_complete(...)` = the `single_call("S4")` replacement), with a real
+cross-language round-trip test.
+
+The literal *swap* the spec describes ("graphify's `QueryEngine` →
+`single_call`") has **no live target**: graphify's OpenHarness `QueryEngine`
+path is retired and its venv is gone, so the acquire stage's code understanding
+comes from the deterministic `python-ast` extractor (no LLM) — which IS the "raw
+AST graph" fallback this section names. So S4 is, in effect, already on its
+fallback, and the bridge is ready for graphify's semantic stage to call the day
+it's revived. No live pipeline change was fabricated into a dormant tool. See §8.
 
 ## 6. Acceptance
 
-1. Mock adapter end-to-end: approved 2-feature plan → files + complete
-   manifest; one slice scripted to fail → its scenarios arrive via template
-   fallback; stage still exits 0 with degradation recorded.
-2. Live (claude adapter), logtrim, one feature: generated Playwright spec
-   parse-checks, targets only stored endpoints/pages, and runs under p0-07
-   against the live app.
-3. Kill mid-stage; `--resume` regenerates only incomplete slices.
-4. A session writing outside `tests/<featureId>/` is blocked (seam contract
-   test 7) and the slice falls back.
+1. ✅ **Mock adapter end-to-end.** Approved 2-feature plan → files + complete
+   manifest; a slice whose session returns `ok:false` → its scenarios arrive via
+   template fallback; stage still returns ok with an `A1` degradation recorded.
+   Also covered: a session that skips one scenario's file (partial fallback), and
+   verified end-to-end through the real spine `plan→checkpoint→generate`.
+2. ✅ **Live (claude adapter), one feature** — `generate-live.test.mjs`
+   (`ENGINE_LIVE_TEST=1`, §7): a real session reads the store through the real
+   context-server MCP and writes a file that `runGenerate` accepts as
+   `agent`/`generated` **only after `node --check` passes**. First live run: 1
+   agent file, header convention held, A1 ledgered, ~14 s. (Running it under
+   p0-07 against a live app is p0-07's acceptance, not verified here.)
+3. ✅ **Resume.** Simulated kill (drop a slice's entries + files) → `--resume`
+   skips the still-current slice and regenerates only the incomplete one
+   (`slicesResumed` counts it; a spy confirms only the incomplete slice's session
+   ran). Resume keys on a per-slice content hash (slices.mjs), not just presence.
+4. ⚠️ **Path confinement — enforced upstream, not re-tested here.** A session
+   writing outside `tests/<featureId>/` is bounded by the seam's tool allowlist +
+   the honesty diff (p0-02b), which only counts files under the feature dir — so
+   stray writes never enter the manifest and the slice falls back. C6 adds a
+   second backstop: manifest entries are derived from `filesWritten` filtered to
+   `<scenarioId>.spec.mjs`, so an off-target or misnamed file is ignored and its
+   scenario templates. Not given a dedicated C6 test — it's a C2b contract.
+
+## 7. Opt-in live test
+
+`ENGINE_LIVE_TEST=1 node --test generation-layer/test-generator/generate-live.test.mjs`
+(model via `ENGINE_LIVE_MODEL`, default `claude-haiku-4-5`). Skipped by default so
+`npm test` stays credential-free. `runGenerate` writes `mcp-config.json` pointing
+the session at the real context-server over the test's store — no extra wiring.
+
+## 8. What we built — deviations & notes
+
+- **Python seam → in-process Node (OQ-4).** No `agentic_harness` subprocess, no
+  exit codes 3/4/5. The stage calls `runSession()` (C2b, Node) directly and
+  branches on `{ ok, error }`. The behavioural contract §3 (read context via MCP,
+  write `tests/<featureId>/<scenarioId>.spec.mjs`, header comment, honesty rule)
+  lives in the connector's `buildSystemPrompt`/`buildSessionPrompt`, already
+  built in p0-02b — C6 does not re-author the prompt, it orchestrates slices.
+- **Stage failMode is `abort`, not `degrade`.** Engine/template degradation is
+  handled INSIDE the stage (every scenario still gets a manifest entry, stage
+  returns ok), matching the store/plan stages. The only `ok:false` from generate
+  is a hard gate failure (no plan, or a **planHash mismatch** — the post-approval
+  integrity check, run first), which must stop the run, never silently degrade.
+- **Template fallback is fetch-based, not Playwright.** §3 says UI/perf use
+  Playwright; the deterministic FLOOR emits self-contained, dependency-free
+  `.mjs` smoke tests (fetch the stored targets) so it needs nothing installed and
+  always parse-checks. The live AGENT still writes richer Playwright specs; the
+  template is the backstop, and p0-07 owns the runtime shape.
+- **Manifest carries `sliceHash`** (beyond p0-00 §7) so resume can distinguish a
+  current file from a stale one. Extra field; no validator rejects it.
+- **`featureId` dirs keep the raw id** (e.g. `tests/feat:checkout/`), consistent
+  with C2b's honesty diff which uses `slice.featureId` verbatim. Verified colon
+  dirs work on macOS/APFS. Slice FILES are sanitised (`plan/slices/feat-checkout.json`).
+- **S4 re-route (§5): bridge built, consumer dormant.** The `bin/complete.mjs`
+  Python→Node bridge + `s4_bridge.py` client (OQ-5) are built and cross-language
+  tested (a real `python3 → bridge → complete()` round-trip sharing cache/ledger/
+  budget). The literal graphify `QueryEngine` swap has no live target — that path
+  is retired and uninstalled — so no wiring was fabricated into a dormant tool;
+  the deterministic `python-ast` extractor is the active S4 source (== the spec's
+  raw-AST fallback). The bridge is what a revived graphify semantic stage calls.
+  This is the whole S4 change the spec anticipated, landed at the mechanism level.

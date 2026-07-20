@@ -8,6 +8,13 @@
 // The hand-rolled deterministic Python AST extractor (python-ast/) is a
 // SEPARATE auto-discovered source now — this wrapper no longer runs it.
 //
+// S4 (LLM enrichment): when graphify's semantic stage is revived, its enrichment
+// call must NOT construct its own LLM engine — it goes through the Node connector
+// via the bridge, so cost is cached/ledgered/budgeted in one place. The Python
+// entry point is `s4_bridge.py` (s4_complete = the `single_call("S4")`
+// replacement, p0-02 §3.4 / p0-06 §5); the raw-AST graph is its fallback. The
+// current graphify invocation below predates that and is itself dormant.
+//
 // Env vars:
 //   TARGET_CODEBASE    absolute path of the source repo (required)
 //   GRAPHIFY_OUT_DIR   forwarded to graphify (defaults to output/graphify)

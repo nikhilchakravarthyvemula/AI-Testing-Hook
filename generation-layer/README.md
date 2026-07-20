@@ -8,7 +8,8 @@
 | `allure-reporter/` | Consolidates API + UI + Perf results into one **Allure** report (pass/fail + reasons, per-step screenshots, route/API/object timing). Standalone Node script. | ✅ |
 | `pdf-reporter/` | Consolidates API + UI + Perf into a single shareable **PDF** (cover, API table + reasons, UI steps with embedded screenshots, perf timing). Headless `page.pdf()`, no new dep. | ✅ |
 | `test-plan-creator/` | C5/S1: reads the per-run knowledge store, makes one S1 call per feature to propose scenarios, then deterministically de-dupes, guards against hallucinated targets, flags mutations fail-safe, and prices the plan → `<run>/plan/test-plan.json` (the checkpoint's subject). Template fallback per feature on engine outage. See `docs/specs/p0-05-test-plan-creator.spec.md`. | ✅ |
-| `test-script-generator/` | Emits runnable Playwright .spec.mjs files. Today: in scripts/crawler/generator/. | 🚧 |
+| `test-generator/` | C6/A1: the agentic generation stage. Per approved feature slice, runs one `runSession()` (C2b) whose agent reads the store via the context-server MCP (C4) and writes `tests/<featureId>/<scenarioId>.spec.mjs`; deterministic backstops template any scenario the session can't produce and `node --check` every file, so every scenario ends with exactly one `tests/manifest.json` entry. Resume-safe (per-slice content hash). See `docs/specs/p0-06-generation-stage.spec.md`. | ✅ |
+| `test-script-generator/` | Emits runnable Playwright .spec.mjs files. Today: in scripts/crawler/generator/. Superseded for the run pipeline by `test-generator/` above. | 🚧 |
 | `mock-data-creator/` | Field-type defaults + per-app config overrides | planned |
 | `validator/` | ESLint + parse-check + diff vs previous generation | planned |
 
