@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { createWorkspace, readRun } from './workspace.mjs';
+import { createWorkspace, readRun, updateRun, hashFile } from './workspace.mjs';
 import { assertFreshAcquisition, snapshotContext, STAGES } from './stages.mjs';
 
 // ── harness ────────────────────────────────────────────────────────────────
@@ -224,4 +224,48 @@ test('stages that must not silently continue are declared abort', (t) => {
   assert.equal(failMode.understand, 'abort');
   assert.equal(failMode.execute, 'abort');      // results are the report's substance
   assert.equal(failMode.report, 'abort');       // the report IS the product
+});
+
+// ── planHash re-verification at execute (p0-01 §5 — the resume guard) ─────────
+
+const runStage = (ctx, name) => STAGES.find((s) => s.name === name).run(ctx);
+
+/** Approve a minimal plan (+ empty manifest) into the workspace and pin its hash. */
+function approvePlan(ctx) {
+  const plan = { runId: ctx.run.runId, createdAt: new Date().toISOString(),
+    source: 'template', features: [], estimates: { scenarios: 0, llmRequests: 0 } };
+  fs.writeFileSync(ctx.paths.planJson, JSON.stringify(plan));
+  fs.mkdirSync(path.dirname(ctx.paths.manifest), { recursive: true });
+  fs.writeFileSync(ctx.paths.manifest, JSON.stringify({ runId: ctx.run.runId, entries: [] }));
+  updateRun(ctx.dir, (run) => {
+    run.checkpoint.approvedAt = new Date().toISOString();
+    run.checkpoint.planHash = hashFile(ctx.paths.planJson);
+    run.checkpoint.approvedBy = 'operator';
+  });
+  ctx.run = readRun(ctx.dir);
+}
+
+test('execute ABORTS on a plan edited after approval — the resume hole (p0-01 §5)', async (t) => {
+  // The exact --resume scenario: generate is already `done` (so its own
+  // planHash gate is skipped), the plan file is edited in the gap, and execute
+  // runs next. Without its own re-check, execute would enforce the safety floor
+  // against — and run tests derived from — a plan the operator never approved.
+  const { ctx } = setup(t);
+  approvePlan(ctx);
+  fs.appendFileSync(ctx.paths.planJson, '\n');    // tamper AFTER approval
+
+  const r = await runStage(ctx, 'execute');
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /changed after approval/);
+  // nothing ran against the target — no results were written.
+  assert.equal(fs.existsSync(ctx.paths.resultsJson), false);
+});
+
+test('execute proceeds when the plan still matches its approved hash', async (t) => {
+  const { ctx } = setup(t);
+  approvePlan(ctx);                                // no tamper
+
+  const r = await runStage(ctx, 'execute');
+  assert.equal(r.ok, true);
+  assert.ok(fs.existsSync(ctx.paths.resultsJson)); // the gate let it run
 });

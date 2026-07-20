@@ -183,9 +183,16 @@ function buildSessionPrompt(slice, runId) {
   lines.push('  3. Begin each file with a header comment:');
   lines.push(`     // run: ${runId ?? '(run)'}  scenario: <scenarioId>  generator: agent`);
   lines.push('');
-  lines.push('UI and perf scenarios use @playwright/test; api scenarios use a fetch-based');
-  lines.push('runnable test. Generate mutation scenarios too — whether they RUN is decided');
-  lines.push('later, not by you.');
+  lines.push('EXECUTION CONTRACT — every file MUST follow it so the executor can run it:');
+  lines.push('  - The file is a Node ESM module that exports `export async function run(ctx)`,');
+  lines.push('    where ctx = { baseUrl, shotDir, env }. It RESOLVES on success and THROWS on');
+  lines.push('    a test failure (an assertion that does not hold). No top-level side effects.');
+  lines.push('  - UI/perf scenarios: `import { chromium } from \'playwright\'` (the library —');
+  lines.push('    NOT @playwright/test, which is not installed), launch, navigate from ctx.baseUrl,');
+  lines.push('    and on failure save a screenshot into ctx.shotDir. Always close the browser.');
+  lines.push('  - api scenarios: use global `fetch` against ctx.baseUrl; assert on the response.');
+  lines.push('  - Generate mutation scenarios too — whether they actually RUN is decided later,');
+  lines.push('    in code, not by you.');
   lines.push('');
   lines.push('Scenarios:');
   for (const sc of slice.scenarios ?? []) {

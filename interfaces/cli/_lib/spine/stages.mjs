@@ -32,6 +32,7 @@ import { runCheckpoint, verifyPlanHash } from './checkpoint.mjs';
 import { buildStore } from '../../../../context-layer/knowledge-store/build.mjs';
 import { createPlan } from '../../../../generation-layer/test-plan-creator/create.mjs';
 import { runGenerate } from '../../../../generation-layer/test-generator/generate.mjs';
+import { runExecute } from '../../../../execution-layer/test-executor/execute.mjs';
 
 // ── the registry ───────────────────────────────────────────────────────────
 
@@ -74,9 +75,9 @@ export const STAGES = [
   },
   {
     name: 'execute',
-    failMode: 'abort',
-    description: 'run the tests against the target',
-    run: notImplemented('p0-07', 'execution-layer/test-executor/'),
+    failMode: 'abort',            // a failed run is RESULTS (failed/error entries),
+    description: 'run the tests against the target',   // not a stage failure; only
+    run: execute,                 // a missing manifest/plan aborts here
   },
   {
     name: 'report',
@@ -414,6 +415,39 @@ async function generate(ctx) {
     `across ${s.features} feature(s)` +
     (s.failed > 0 ? `; ${s.failed} failed-generation` : '') +
     (s.slicesResumed > 0 ? `; ${s.slicesResumed} slice(s) resumed` : ''));
+  return { ok: true };
+}
+
+// ── execute ────────────────────────────────────────────────────────────────
+
+async function execute(ctx) {
+  if (ctx.opts.dryRun) {
+    ctx.io.out('  (dry-run) enforce safe/full + safety floor, run allowed tests as child processes');
+    return { ok: true };
+  }
+
+  // Re-verify the approved plan BEFORE touching the live target — this stage owns
+  // the check as much as generate does (p0-01 §5). On `testo run --resume`, a
+  // generate stage already marked `done` is skipped, so ITS gate never re-runs;
+  // execute reads plan/test-plan.json to enforce the safety floor, and would
+  // otherwise run against a plan edited in the gap between approval and here. A
+  // mismatch is a hard stop: nothing executes that the operator didn't approve.
+  const gate = verifyPlanHash(ctx.dir, ctx.paths.planJson, readRun(ctx.dir));
+  if (!gate.ok) return { ok: false, reason: gate.reason };
+
+  const result = await runExecute({
+    workspace: ctx.dir,
+    runId: ctx.run.runId,
+    mode: ctx.run.mode,
+    target: { url: ctx.run.target.url },
+    log: (m) => ctx.io.out(m),
+  });
+
+  if (!result.ok) return { ok: false, reason: result.reason };
+
+  const s = result.stats;
+  ctx.io.out(`  ✓ execute: ${s.passed} passed, ${s.failed} failed, ` +
+    `${s.skippedMutation} skipped (mutation/safety), ${s.error} error`);
   return { ok: true };
 }
 

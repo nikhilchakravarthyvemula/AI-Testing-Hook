@@ -1,6 +1,12 @@
 # P0-07 — Execution Stage · SPEC
 
-**Status:** Draft v1.0 (for review)
+**Status:** v1.1 — **IMPLEMENTED 2026-07-20** (`execution-layer/test-executor/`:
+`execute.mjs` + `lib/{safety-floor,enforce,results,runner-child,harness}.mjs`;
+wired as the spine `execute` stage). `npm run test:execute` — 17 tests
+(enforcement matrix + real child-process pass/fail/no-run/timeout+no-orphan +
+C6-template↔executor round-trips against a live local server). Acceptance 1-3
+covered; §4's mechanism proven deterministically (local server), the live
+logtrim UI+screenshots run left opt-in — see §5, §6.
 **Depends on:** p0-06 (manifest + tests), p0-01 (mode config, workspace)
 **Consumed by:** p0-08 (results.json + artifacts)
 **Fills:** `execution-layer/test-executor/` (today: a README).
@@ -66,12 +72,56 @@ skipped-mutation | error`.
 
 ## 5. Acceptance
 
-1. Manifest of 6 (3 safe, 2 mutation, 1 failed-generation), safe mode: 3 run,
-   2 `skipped-mutation`, 1 carried; results validate; no orphan processes
-   after a forced timeout (verified via process table).
-2. Full mode: mutation entries run; a safety-floor-matching scenario still
-   skips without an allowlist entry.
-3. A test that hangs is killed at timeout, marked `error`, and the stage
-   continues.
-4. logtrim live run (safe): real pass/fail results with screenshots for
-   failures.
+1. ✅ **Safe-mode enforcement.** Manifest of 6 (3 safe, 2 mutation, 1
+   failed-generation), safe mode → 3 run, 2 `skipped-mutation` (reason
+   `safe-mode`), 1 carried (`error`, reason `failed-generation`); every entry
+   present once; summary derived from entries. No-orphan verified separately (§3
+   below), by process liveness not the process table.
+2. ✅ **Full mode + floor.** Full mode runs the mutation entries; a
+   safety-floor-matching scenario still `skipped-mutation` (reason
+   `safety-floor`) with no allowlist entry, and runs only when its scenarioId is
+   in `SAFETY_ALLOWLIST` — proven in both modes.
+3. ✅ **Hang → timeout, no orphan, stage continues.** A test that spawns a
+   long-lived grandchild and hangs is killed at `TEST_TIMEOUT_MS`; the entry is
+   `error` (reason `timeout`) and the grandchild is reaped (its pid is dead) —
+   proving the whole process GROUP is killed, not just the node process.
+4. ⚠️ **Live results — mechanism verified, logtrim UI run opt-in.** Real
+   pass/fail with a real child process and collected log artifact is proven
+   deterministically against a local `http.Server`, executing an actual C6
+   template file (generate↔execute contract). The full logtrim run with
+   Playwright UI + screenshots-on-failure needs a live app + login/storageState,
+   so it's a manual/opt-in run, not a committed test. Screenshots are wired
+   (`ctx.shotDir` → `results/shots/<scenarioId>/`, collected into `artifacts`).
+
+## 6. What we built — deviations & notes
+
+- **The safety floor joins the plan, not just the manifest.** The floor reads
+  scenario title+intent+targets (p0-00 §9), which the manifest doesn't carry — so
+  the executor loads `plan/test-plan.json` and joins by `scenarioId`. A missing
+  plan is a hard stop (can't enforce the floor → don't run).
+- **execute re-verifies `planHash` first (p0-01 §5).** Because it reads that same
+  plan to enforce the floor and derive what runs, the `execute` stage calls
+  `verifyPlanHash` before anything — a mismatch aborts. This is NOT redundant with
+  generate's gate: on `testo run --resume`, an already-`done` generate is skipped,
+  so execute owns the re-check on the path that touches the live target. (Fixed
+  2026-07-20 — the initial C7 landing had the gate only in generate.)
+- **One test-file execution contract, system-wide.** Every generated file —
+  agent OR template — exports `export async function run(ctx)` (ctx = { baseUrl,
+  shotDir, env }); resolves = pass, throws = fail. UI/perf use the `playwright`
+  LIBRARY (chromium.launch), not `@playwright/test` (not installed), matching the
+  house style. The C6 session prompt (`buildSessionPrompt`) was updated to state
+  this contract; **re-verified live** — the real agent now emits `run()`-exporting
+  files. The executor spawns a tiny `harness.mjs` that imports the file and calls
+  `run()`; exit 0/1/2 → passed/failed/error(no-run-export).
+- **No orphans via process groups.** Children are spawned `detached` (own group);
+  a timeout does `process.kill(-pid, 'SIGKILL')` to take the whole subtree
+  (Chromium included). This is the E2B lesson applied to the local backend; the
+  runner is an interface so a Docker/E2B backend can replace it later.
+- **`failed-generation` → results `error`** (reason `failed-generation`) — p0-00
+  §8 has four statuses and no separate "carried" state; it's honestly an error
+  that never ran. Results entries also carry an extra `reason` field (why a
+  skip/error happened) beyond the §8 shape — additive, for the report.
+- **One retry, infra only.** A `spawn`-class error (couldn't launch the child) is
+  retried once; a test FAILURE never is (heal/retry is S5, P1).
+- **Stage wall clock.** `EXECUTE_MAX_MINUTES` (default 60): once exceeded,
+  remaining entries are marked `error`/`stage-timeout`, never silently dropped.

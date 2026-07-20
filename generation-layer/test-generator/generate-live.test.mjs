@@ -89,6 +89,9 @@ test('a real agent session writes a parse-clean test via the live MCP', { skip: 
   // §2/§4: the file parse-checks — it earned `generated` only by passing node --check.
   const src = fs.readFileSync(path.join(ws, e.file), 'utf8');
   assert.match(src, /scenario:\s*sc-0001/);         // the header convention held
+  // the unified execution contract (C7): the file exports run() so the executor
+  // can drive it exactly like a template file.
+  assert.match(src, /export\s+(async\s+)?function\s+run\b/, 'agent file must export run(ctx)');
   assert.equal(res.stats.generated, 1);
 
   // an A1 session call was ledgered.
