@@ -43,10 +43,17 @@ export const SCENARIOS = {
 export const SYSTEM_PROMPT =
   'You are a senior QA engineer proposing test scenarios for one feature of a ' +
   'web application. You are given ONLY the endpoints, pages, and known coverage ' +
-  'gaps that were actually observed for this feature. Propose focused, ' +
-  'high-value scenarios that exercise this real surface area. Never invent an ' +
-  'endpoint or page that is not in the lists given — every target you name must ' +
-  'be copied verbatim from those lists.';
+  'gaps that were actually observed for this feature. Never invent an endpoint or ' +
+  'page that is not in the lists given — every target you name must be copied ' +
+  'verbatim from those lists.\n\n' +
+  'Optimise for DEPTH, not breadth. A scenario that pins one endpoint against many ' +
+  'concrete edge cases is worth more than one that skims a whole lifecycle. Keep ' +
+  'each scenario TIGHT — one endpoint, or a small group that genuinely must be ' +
+  'exercised together (e.g. create-then-read a resource). Do NOT bundle an entire ' +
+  'CRUD lifecycle into a single scenario.\n\n' +
+  'Isolate destructive operations. Put each DELETE / cancel / revoke / deactivate ' +
+  'in its OWN scenario, never mixed with reads or creates — a safety gate may ' +
+  'withhold a destructive test, and it must not take safe reads down with it.';
 
 /**
  * Build the S1 user prompt from a feature's context (store.featureContext()).
@@ -93,12 +100,30 @@ export function buildPrompt(featureCtx) {
   }
   lines.push('');
 
+  const endpointCount = endpoints.length;
+  const pageCount = pages.length;
+  // Scale the ask to the surface area rather than a flat cap: a feature with 30
+  // endpoints deserves far more than one with 3. The human checkpoint (which sees
+  // the cost estimate) is what bounds this, not an arbitrary ceiling here.
+  const target = Math.max(3, endpointCount + pageCount);
+
   lines.push(
-    'Propose 1-6 scenarios. Prefer scenarios that close a listed gap. Each ' +
-    'scenario needs at least one target endpoint or page, chosen from the lists ' +
-    'above. Set kind to "api" for endpoint-only tests, "ui" for page flows, ' +
-    '"perf" for load/latency tests. Set mutationOpinion to true if you believe ' +
-    'the scenario writes to the app.',
+    `This feature exposes ${endpointCount} endpoint(s) and ${pageCount} page(s). ` +
+    `Propose roughly ${target}-${target * 2} scenarios — cover EVERY endpoint and ` +
+    'page at least once, then add depth where risk warrants it. Guidance:\n' +
+    '  - One endpoint (or a tight must-test-together group) per scenario. Split a ' +
+    'CRUD lifecycle into separate create / read / update / delete scenarios.\n' +
+    '  - For each endpoint prefer DEPTH: enumerate concrete edge cases across ' +
+    'scenarios — happy path, missing/empty/oversized/malformed inputs, injection ' +
+    '(SQL/NoSQL/path-traversal), authorization (unauthenticated, cross-tenant), ' +
+    'not-found, and idempotency / repeated calls.\n' +
+    '  - Put each destructive operation (DELETE / cancel / revoke) in its OWN ' +
+    'scenario, isolated from reads and creates.\n' +
+    '  - Prefer scenarios that close a listed gap. Every scenario needs at least ' +
+    'one target endpoint or page, copied verbatim from the lists above.\n' +
+    '  - Set kind to "api" for endpoint-only tests, "ui" for page flows, "perf" ' +
+    'for load/latency tests. Set mutationOpinion to true if the scenario writes ' +
+    'to the app.',
   );
 
   return lines.join('\n');

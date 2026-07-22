@@ -414,6 +414,7 @@ async function generate(ctx) {
   const s = result.stats;
   ctx.io.out(`  ✓ generate: ${s.generated} agent + ${s.templated} template of ${s.scenarios} scenario(s) ` +
     `across ${s.features} feature(s)` +
+    (s.batches > s.features ? ` in ${s.batches} batches` : '') +
     (s.failed > 0 ? `; ${s.failed} failed-generation` : '') +
     (s.sessionRetries > 0 ? `; ${s.sessionRetries} session(s) retried` : '') +
     (s.slicesResumed > 0 ? `; ${s.slicesResumed} slice(s) resumed` : ''));

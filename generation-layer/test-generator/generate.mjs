@@ -25,7 +25,7 @@ import path from 'node:path';
 import { runSession } from '../../infrastructure/model-api-connector/index.mjs';
 import { writeMcpConfig } from '../../context-layer/context-server/server.mjs';
 
-import { writeSlices, sliceIsComplete } from './lib/slices.mjs';
+import { writeSlices, sliceIsComplete, featureCount } from './lib/slices.mjs';
 import { writeTemplateFile } from './lib/template-gen.mjs';
 import { parseCheck, rejectFile } from './lib/validate.mjs';
 import { readManifest, writeManifest, entriesById, makeEntry } from './lib/manifest.mjs';
@@ -34,8 +34,11 @@ const SPEC_SUFFIX = '.spec.mjs';
 
 // One retry per slice, matching the executor's "one retry, infrastructure only"
 // rule (p0-07 §6). Set GENERATE_SESSION_RETRIES=0 to disable when a retry costs
-// more than it's worth (each attempt draws on the same run budget).
-const SESSION_RETRIES = Number(process.env.GENERATE_SESSION_RETRIES ?? 1);
+// more than it's worth (each attempt draws on the same run budget). Read at call
+// time so the env var applies whenever it is set, not only before module load.
+function sessionRetries() {
+  return Number(process.env.GENERATE_SESSION_RETRIES ?? 1);
+}
 
 // Only a TRANSIENT engine failure earns a retry:
 //   engine-unavailable — timeout, CLI crash, API blip. Might well succeed next time.
@@ -79,7 +82,7 @@ export async function runGenerate(ctx) {
   const entries = [];
   const degraded = [];
   const stats = {
-    features: slices.length, scenarios: 0,
+    features: featureCount(slices), batches: slices.length, scenarios: 0,
     generated: 0, templated: 0, failed: 0, skippedResume: 0, slicesResumed: 0,
     sessionRetries: 0,
   };
@@ -96,7 +99,7 @@ export async function runGenerate(ctx) {
         stats.skippedResume += 1;
       }
       stats.slicesResumed += 1;
-      log(`${slice.name}: resumed (${slice.scenarios.length} scenario(s) unchanged)`);
+      log(`${slice.label}: resumed (${slice.scenarios.length} scenario(s) unchanged)`);
       continue;
     }
 
@@ -129,7 +132,7 @@ export async function runGenerate(ctx) {
       const kept = slice.scenarios.length - fellBack;
       degraded.push({
         useCase: 'A1', stage: 'generate',
-        reason: `agent session unavailable (${result.error}) for feature "${slice.name}"` +
+        reason: `agent session unavailable (${result.error}) for feature "${slice.label}"` +
           (attempts > 1 ? ` after ${attempts} attempts` : '') +
           (result.detail ? ` — ${result.detail}` : ''),
         // Say what actually survived: "all 6 templated" and "4 kept, 2 templated"
@@ -141,11 +144,11 @@ export async function runGenerate(ctx) {
     } else if (fellBack > 0) {
       degraded.push({
         useCase: 'A1', stage: 'generate',
-        reason: `session for "${slice.name}" left ${fellBack} of ${slice.scenarios.length} scenario(s) ungenerated or unparseable`,
+        reason: `session for "${slice.label}" left ${fellBack} of ${slice.scenarios.length} scenario(s) ungenerated or unparseable`,
         fallback: `template test(s) for ${fellBack} scenario(s)`,
       });
     }
-    log(`${slice.name}: ${slice.scenarios.length - fellBack} agent + ${fellBack} template`);
+    log(`${slice.label}: ${slice.scenarios.length - fellBack} agent + ${fellBack} template`);
   }
 
   writeManifest(ctx.workspace, { runId: ctx.runId ?? plan.runId ?? null, entries });
@@ -168,7 +171,8 @@ export async function runGenerate(ctx) {
  */
 async function runSliceSession({ sessionFn, workspace, slice, mcpConfigPath, runId, engine, log }) {
   const produced = new Set();
-  const maxAttempts = Math.max(1, SESSION_RETRIES + 1);
+  const retries = sessionRetries();
+  const maxAttempts = Math.max(1, retries + 1);
   let result;
   let attempts = 0;
 
@@ -182,7 +186,7 @@ async function runSliceSession({ sessionFn, workspace, slice, mcpConfigPath, run
 
     if (result.ok || !RETRYABLE.has(result.error)) break;
     if (attempts < maxAttempts) {
-      log(`${slice.name}: session failed (${result.error}) — retrying ${attempts}/${SESSION_RETRIES}`);
+      log(`${slice.label}: session failed (${result.error}) — retrying ${attempts}/${retries}`);
     }
   }
 

@@ -159,6 +159,20 @@ the session at the real context-server over the test's store — no extra wiring
   union is everything the slice produced. Without this, the retry would have made
   things worse — attempt 2 re-writes files attempt 1 already made, they no longer
   count as "new", and they'd be templated over.
+- **Batched generation** (added 2026-07-21, once p0-05 went depth-first). A slice
+  used to be a whole feature; a depth-first plan gives a feature dozens of
+  scenarios, and one session cannot write dozens of files inside its turn/time
+  budget (`SESSION_MAX_TURNS` 24, `SESSION_TIMEOUT_MS` 5 min) — so most would fall
+  to template. Now a feature is chunked (`GENERATE_BATCH_SIZE`, default 8) and each
+  chunk is its own slice with its own session. Batches for one feature write into
+  the same `tests/<featureId>/` dir and run sequentially, so the honesty diff and
+  resume both stay correct — each keys on scenarioId + sliceHash, never on the
+  batch boundary. `sliceHash` folds in the batch index so re-batching regenerates
+  cleanly rather than false-resuming. Slice files are `<featureId>-<n>.json`. Stats
+  gained `batches`; a batch's degradation names the batch (`"Big (batch 2/3)"`).
+- **`GENERATE_BATCH_SIZE` and `GENERATE_SESSION_RETRIES` read at call time**, not
+  module load, so setting them per-run works (a subtle bug: bound-at-import meant
+  the env var only applied if set before the module first loaded).
 - **Manifest carries `sliceHash`** (beyond p0-00 §7) so resume can distinguish a
   current file from a stale one. Extra field; no validator rejects it.
 - **`featureId` dirs keep the raw id** (e.g. `tests/feat:checkout/`), consistent

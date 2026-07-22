@@ -103,6 +103,18 @@ function flakySession({ failures = 1, error = 'engine-unavailable', partialOn = 
   return fn;
 }
 
+/** A single feature carrying `n` scenarios — for exercising batching. */
+function bigFeaturePlan(n, runId = 'r1') {
+  const scenarios = Array.from({ length: n }, (_, i) => {
+    const id = `sc-${String(i + 1).padStart(4, '0')}`;
+    return { scenarioId: id, title: id, kind: 'api', intent: `probe ${i}`, mutation: false,
+      targets: { endpoints: [`GET /api/x${i}`] }, priority: 0, gapRefs: [] };
+  });
+  return { runId, createdAt: '2026-07-21T00:00:00Z', source: 'llm',
+    features: [{ featureId: 'feat:big', name: 'Big', source: 'llm', scenarios }],
+    estimates: { scenarios: n, llmRequests: n * 2 } };
+}
+
 const allScenarioIds = (plan) => plan.features.flatMap((f) => f.scenarios.map((s) => s.scenarioId));
 
 // Every scenario in the plan must have EXACTLY one manifest entry (§1 honesty).
@@ -190,6 +202,68 @@ test('unparseable agent file → moved to _rejected, scenario templated', async 
   // the broken original was moved out of the executor's path.
   assert.ok(fs.existsSync(path.join(ws, 'tests', '_rejected', 'feat:checkout', 'sc-0001.spec.mjs')));
   assert.ok(res.degraded.length >= 1);
+});
+
+// ── batching: a big feature is split into several sessions ───────────────────
+
+test('a feature with many scenarios is split into batches, one session each', async (t) => {
+  const prev = process.env.GENERATE_BATCH_SIZE;
+  process.env.GENERATE_BATCH_SIZE = '8';
+  t.after(() => { if (prev === undefined) delete process.env.GENERATE_BATCH_SIZE; else process.env.GENERATE_BATCH_SIZE = prev; });
+
+  const plan = bigFeaturePlan(20);                 // 20 scenarios ⇒ 3 batches of 8/8/4
+  const ws = makeWorkspace(t, plan);
+  const session = sessionWriting();
+  const res = await runGenerate({ workspace: ws, runId: 'r1', engine: {}, sessionFn: session });
+
+  assert.equal(res.ok, true);
+  assert.equal(res.stats.features, 1, 'still one feature');
+  assert.equal(res.stats.batches, 3, '20 scenarios / 8 per batch = 3 sessions');
+  assert.equal(res.stats.generated, 20);
+
+  // every scenario has exactly one entry, all under the same feature dir.
+  const m = readManifest(ws);
+  assertComplete(m, plan);
+  assert.ok(m.entries.every((e) => e.featureId === 'feat:big' && e.generator === 'agent'));
+
+  // three distinct slice files were written (batch-suffixed).
+  const sliceDir = path.join(ws, 'plan', 'slices');
+  const files = fs.readdirSync(sliceDir).sort();
+  assert.deepEqual(files, ['feat-big-1.json', 'feat-big-2.json', 'feat-big-3.json']);
+});
+
+test('one batch failing only templates that batch, not the whole feature', async (t) => {
+  const prev = process.env.GENERATE_BATCH_SIZE;
+  process.env.GENERATE_BATCH_SIZE = '4';           // 12 scenarios ⇒ batches of 4/4/4
+  t.after(() => { if (prev === undefined) delete process.env.GENERATE_BATCH_SIZE; else process.env.GENERATE_BATCH_SIZE = prev; });
+
+  const plan = bigFeaturePlan(12);
+  const ws = makeWorkspace(t, plan);
+
+  // Fail the MIDDLE batch on every attempt, identified by its content (sc-0005),
+  // so the retry (which re-invokes the same failing batch) also fails — the
+  // outcome does not depend on how many attempts run.
+  const sessionFn = (args) => {
+    const isMiddle = args.slice.scenarios.some((s) => s.scenarioId === 'sc-0005');
+    if (isMiddle) return { ok: false, error: 'engine-unavailable', detail: 'boom', filesWritten: [] };
+    return sessionWriting()(args);
+  };
+
+  const res = await runGenerate({ workspace: ws, runId: 'r1', engine: {}, sessionFn });
+  assert.equal(res.ok, true);
+  assertComplete(readManifest(ws), plan);
+
+  // batches 1 and 3 are agent (8 scenarios); the failed middle batch templated (4).
+  assert.equal(res.stats.generated, 8);
+  assert.equal(res.stats.templated, 4);
+  assert.equal(res.stats.batches, 3);
+  assert.equal(res.degraded.length, 1);
+  assert.match(res.degraded[0].reason, /batch 2\/3/);   // the label pinpoints the batch
+
+  // the two good batches' files are agent; the middle four are template.
+  const m = readManifest(ws);
+  assert.equal(m.entries.filter((e) => e.generator === 'agent').length, 8);
+  assert.equal(m.entries.filter((e) => e.generator === 'template').length, 4);
 });
 
 // ── retry: a transient engine failure gets one more attempt ──────────────────
