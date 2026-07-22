@@ -58,9 +58,12 @@ const PAGES = ${JSON.stringify(pages)};
  * Smoke-exercise every stored target. Returns per-target checks; throws on a
  * hard transport error so the runner records a failure.
  */
-export async function run({ baseUrl = process.env.BASE_URL } = {}) {
+export async function run({ baseUrl = process.env.BASE_URL, authToken = process.env.AUTH_TOKEN || null } = {}) {
   if (!baseUrl) throw new Error('template test needs a baseUrl (BASE_URL)');
   const base = baseUrl.replace(/\\/+$/, '');
+  // The run's bearer, when it has one. Without it a login-walled target answers
+  // 401/redirect for everything, which says nothing about the app.
+  const headers = authToken ? { Authorization: \`Bearer \${authToken}\` } : {};
   const checks = [];
 
   for (const ep of ENDPOINTS) {
@@ -70,12 +73,12 @@ export async function run({ baseUrl = process.env.BASE_URL } = {}) {
     // A path template may carry {params}; a smoke test can't invent values, so
     // parameterised endpoints are recorded as skipped rather than guessed.
     if (/[{:]/.test(rawPath)) { checks.push({ target: ep, status: 'skipped-parameterised' }); continue; }
-    const res = await fetch(base + rawPath, { method, redirect: 'manual' });
+    const res = await fetch(base + rawPath, { method, headers, redirect: 'manual' });
     checks.push({ target: ep, httpStatus: res.status, ok: res.status < 500 });
   }
 
   for (const pg of PAGES) {
-    const res = await fetch(base + pg, { method: 'GET', redirect: 'manual' });
+    const res = await fetch(base + pg, { method: 'GET', headers, redirect: 'manual' });
     checks.push({ target: pg, httpStatus: res.status, ok: res.status < 500 });
   }
 

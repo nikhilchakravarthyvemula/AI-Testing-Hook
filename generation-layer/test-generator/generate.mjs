@@ -32,6 +32,20 @@ import { readManifest, writeManifest, entriesById, makeEntry } from './lib/manif
 
 const SPEC_SUFFIX = '.spec.mjs';
 
+// One retry per slice, matching the executor's "one retry, infrastructure only"
+// rule (p0-07 §6). Set GENERATE_SESSION_RETRIES=0 to disable when a retry costs
+// more than it's worth (each attempt draws on the same run budget).
+const SESSION_RETRIES = Number(process.env.GENERATE_SESSION_RETRIES ?? 1);
+
+// Only a TRANSIENT engine failure earns a retry:
+//   engine-unavailable — timeout, CLI crash, API blip. Might well succeed next time.
+//   budget-exhausted   — never retried: the budget does not grow back, so a second
+//                        attempt is guaranteed to fail the same way.
+//   honesty-failure    — never retried: the session ran to completion and chose to
+//                        write nothing. That usually means something systemic (no
+//                        MCP context to work from), which a retry will not fix.
+const RETRYABLE = new Set(['engine-unavailable']);
+
 /**
  * @param {object} ctx
  * @param {string} ctx.workspace       run dir (reads plan/, writes tests/)
@@ -67,6 +81,7 @@ export async function runGenerate(ctx) {
   const stats = {
     features: slices.length, scenarios: 0,
     generated: 0, templated: 0, failed: 0, skippedResume: 0, slicesResumed: 0,
+    sessionRetries: 0,
   };
 
   for (const slice of slices) {
@@ -85,19 +100,23 @@ export async function runGenerate(ctx) {
       continue;
     }
 
-    // ── one session per slice ────────────────────────────────────────────────
-    const result = await sessionFn({
-      workspace: ctx.workspace, slice, mcpConfigPath, runId: ctx.runId,
-      provider: ctx.engine?.provider, model: ctx.engine?.model, maxRequests: ctx.engine?.maxRequests,
+    // ── one session per slice, retried once on a transient failure ───────────
+    const { result, filesWritten, attempts } = await runSliceSession({
+      sessionFn, workspace: ctx.workspace, slice, mcpConfigPath, runId: ctx.runId,
+      engine: ctx.engine, log,
     });
+    if (attempts > 1) stats.sessionRetries += 1;
 
-    const written = result.ok ? indexWritten(result.filesWritten) : new Map();
+    // Files count whether the session ended ok or not. A session that died
+    // mid-run still wrote what it wrote; discarding that to template over it
+    // would throw away real work (and real budget) for no reason.
+    const written = indexWritten(filesWritten);
     let fellBack = 0;
 
     for (const sc of slice.scenarios) {
       const entry = resolveScenario({
         workspace: ctx.workspace, slice, scenario: sc, runId: ctx.runId,
-        writtenFile: written.get(sc.scenarioId), sessionOk: result.ok,
+        writtenFile: written.get(sc.scenarioId),
       });
       if (entry.generator === 'template') fellBack += 1;
       if (entry.status === 'generated' && entry.generator === 'agent') stats.generated += 1;
@@ -107,10 +126,17 @@ export async function runGenerate(ctx) {
     }
 
     if (!result.ok) {
+      const kept = slice.scenarios.length - fellBack;
       degraded.push({
         useCase: 'A1', stage: 'generate',
-        reason: `agent session unavailable (${result.error}) for feature "${slice.name}" — ${result.detail ?? ''}`.trim(),
-        fallback: `template test(s) for ${slice.scenarios.length} scenario(s)`,
+        reason: `agent session unavailable (${result.error}) for feature "${slice.name}"` +
+          (attempts > 1 ? ` after ${attempts} attempts` : '') +
+          (result.detail ? ` — ${result.detail}` : ''),
+        // Say what actually survived: "all 6 templated" and "4 kept, 2 templated"
+        // are very different outcomes for the reader of the report.
+        fallback: kept > 0
+          ? `${kept} scenario(s) kept from the partial session, template test(s) for ${fellBack}`
+          : `template test(s) for ${fellBack} scenario(s)`,
       });
     } else if (fellBack > 0) {
       degraded.push({
@@ -126,21 +152,63 @@ export async function runGenerate(ctx) {
   return { ok: true, stats, degraded };
 }
 
+// ── the session, with its one retry ──────────────────────────────────────────
+
+/**
+ * Run one slice's session, retrying once on a transient engine failure.
+ *
+ * Files are accumulated ACROSS attempts, and that is the load-bearing part: each
+ * attempt reports only the files that appeared during IT (the honesty diff is
+ * before/after per call), so attempt 2 does not re-report what attempt 1 already
+ * wrote. Union them and you have everything the slice produced; use only the
+ * last attempt's list and a retry would silently template over attempt 1's work.
+ *
+ * @returns {{ result: object, filesWritten: string[], attempts: number }}
+ *   `result` is the LAST attempt's outcome — what the degradation entry describes.
+ */
+async function runSliceSession({ sessionFn, workspace, slice, mcpConfigPath, runId, engine, log }) {
+  const produced = new Set();
+  const maxAttempts = Math.max(1, SESSION_RETRIES + 1);
+  let result;
+  let attempts = 0;
+
+  while (attempts < maxAttempts) {
+    attempts += 1;
+    result = await sessionFn({
+      workspace, slice, mcpConfigPath, runId,
+      provider: engine?.provider, model: engine?.model, maxRequests: engine?.maxRequests,
+    });
+    for (const f of result.filesWritten ?? []) produced.add(f);
+
+    if (result.ok || !RETRYABLE.has(result.error)) break;
+    if (attempts < maxAttempts) {
+      log(`${slice.name}: session failed (${result.error}) — retrying ${attempts}/${SESSION_RETRIES}`);
+    }
+  }
+
+  return { result, filesWritten: [...produced], attempts };
+}
+
 // ── per-scenario resolution (the backstop cascade) ───────────────────────────
 
 /**
  * Decide one scenario's manifest entry: prefer a parse-clean agent file, else
  * template it (also parse-checked). A file that won't parse is rejected out of
  * the executor's path, never handed downstream as if it were good.
+ *
+ * `writtenFile` is honoured even when the SESSION failed — a file that exists
+ * and parses is real output whatever happened to the session around it. The
+ * parse gate below is what makes that safe: a half-written file fails it and
+ * templates like any other.
  */
-function resolveScenario({ workspace, slice, scenario, runId, writtenFile, sessionOk }) {
+function resolveScenario({ workspace, slice, scenario, runId, writtenFile }) {
   const base = {
     scenarioId: scenario.scenarioId, featureId: slice.featureId,
     kind: scenario.kind, mutation: scenario.mutation, sliceHash: slice.sliceHash,
   };
 
   // 1. the agent wrote this scenario's file — accept it only if it parses.
-  if (sessionOk && writtenFile) {
+  if (writtenFile) {
     const check = parseCheck(workspace, writtenFile);
     if (check.ok) {
       return makeEntry({ ...base, file: writtenFile, generator: 'agent', status: 'generated' });

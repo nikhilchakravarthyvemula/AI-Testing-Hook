@@ -60,6 +60,49 @@ function sessionWriting({ failFeatures = new Set(), fileKind = () => 'valid' } =
   };
 }
 
+/** Write one agent-style file, returning its workspace-relative path. */
+function writeAgentFile(ws, featureId, scenarioId) {
+  const rel = path.join('tests', featureId, `${scenarioId}.spec.mjs`);
+  const abs = path.join(ws, rel);
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, `// agent\nexport async function run() { return { ok: true }; }\n`);
+  return rel;
+}
+
+/**
+ * A session that fails its first `failures` attempts per feature — optionally
+ * after finishing some scenarios' files, the way a timeout kills a session
+ * mid-run — then succeeds.
+ *
+ * Mirrors production's honesty diff: an attempt only reports files that did NOT
+ * already exist when it started, so a retry never re-reports what the previous
+ * attempt wrote. That's what makes the accumulate-across-attempts logic testable.
+ */
+function flakySession({ failures = 1, error = 'engine-unavailable', partialOn = () => false } = {}) {
+  const calls = [];
+  const fn = ({ workspace, slice }) => {
+    const nth = calls.filter((f) => f === slice.featureId).length + 1;
+    calls.push(slice.featureId);
+
+    const fresh = [];
+    const emit = (scenarioId) => {
+      const rel = path.join('tests', slice.featureId, `${scenarioId}.spec.mjs`);
+      const existed = fs.existsSync(path.join(workspace, rel));
+      writeAgentFile(workspace, slice.featureId, scenarioId);
+      if (!existed) fresh.push(rel);
+    };
+
+    if (nth <= failures) {
+      for (const sc of slice.scenarios) if (partialOn(sc.scenarioId)) emit(sc.scenarioId);
+      return { ok: false, error, detail: 'simulated transient failure', filesWritten: fresh };
+    }
+    for (const sc of slice.scenarios) emit(sc.scenarioId);
+    return { ok: true, filesWritten: fresh };
+  };
+  fn.calls = calls;
+  return fn;
+}
+
 const allScenarioIds = (plan) => plan.features.flatMap((f) => f.scenarios.map((s) => s.scenarioId));
 
 // Every scenario in the plan must have EXACTLY one manifest entry (§1 honesty).
@@ -147,6 +190,59 @@ test('unparseable agent file → moved to _rejected, scenario templated', async 
   // the broken original was moved out of the executor's path.
   assert.ok(fs.existsSync(path.join(ws, 'tests', '_rejected', 'feat:checkout', 'sc-0001.spec.mjs')));
   assert.ok(res.degraded.length >= 1);
+});
+
+// ── retry: a transient engine failure gets one more attempt ──────────────────
+
+test('a transient session failure is retried once, and the retry\'s work is used', async (t) => {
+  const ws = makeWorkspace(t);
+  const session = flakySession();                       // fails once per feature, then succeeds
+  const res = await runGenerate({ workspace: ws, runId: 'r1', engine: {}, sessionFn: session });
+
+  assert.equal(res.ok, true);
+  assert.equal(session.calls.length, 4, '2 features × (1 failure + 1 retry)');
+  assert.equal(res.stats.sessionRetries, 2);
+
+  const m = readManifest(ws);
+  assertComplete(m, planFixture());
+  assert.ok(m.entries.every((e) => e.generator === 'agent'), 'the retry succeeded — nothing templated');
+  // A slice that RECOVERED is not a degradation: the output is fully agent-made.
+  // The failed attempt is still auditable — the connector ledgers it.
+  assert.equal(res.degraded.length, 0);
+});
+
+test('partial work from a session that never recovers is kept, not templated over', async (t) => {
+  const ws = makeWorkspace(t);
+  // sc-0001's file is finished before the session dies; it never recovers, so
+  // the retry also fails — and re-reports nothing, since the file now exists.
+  const session = flakySession({ failures: 99, partialOn: (id) => id === 'sc-0001' });
+  const res = await runGenerate({ workspace: ws, runId: 'r1', engine: {}, sessionFn: session });
+
+  assert.equal(res.ok, true);
+  const m = readManifest(ws);
+  assertComplete(m, planFixture());
+
+  // the one file the dying session actually finished survives as agent work…
+  assert.equal(entryFor(m, 'sc-0001').generator, 'agent');
+  // …and only the scenarios with no file of their own fall back.
+  assert.equal(entryFor(m, 'sc-0002').generator, 'template');
+  assert.equal(entryFor(m, 'sc-0003').generator, 'template');
+
+  // the degradation reports what SURVIVED, not "the whole slice fell back".
+  const checkout = res.degraded.find((d) => d.reason.includes('Checkout'));
+  assert.match(checkout.reason, /after 2 attempts/);
+  assert.match(checkout.fallback, /1 scenario\(s\) kept/);
+});
+
+test('budget-exhausted is never retried — the budget does not grow back', async (t) => {
+  const ws = makeWorkspace(t);
+  const session = flakySession({ failures: 99, error: 'budget-exhausted' });
+  const res = await runGenerate({ workspace: ws, runId: 'r1', engine: {}, sessionFn: session });
+
+  assert.equal(res.ok, true);
+  assert.equal(session.calls.length, 2, 'one attempt per feature, no retry');
+  assert.equal(res.stats.sessionRetries, 0);
+  assert.ok(readManifest(ws).entries.every((e) => e.generator === 'template'));
 });
 
 // ── acceptance 3 — resume regenerates only incomplete slices ──────────────────

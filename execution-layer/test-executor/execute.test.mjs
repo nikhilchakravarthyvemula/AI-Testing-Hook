@@ -41,6 +41,10 @@ function assertOnePerEntry(results, manifest) {
   assert.ok(results.entries.every((e) => STATUSES.includes(e.status)));
 }
 
+// Most tests exercise enforcement/the runner, not auth: resolving auth for real
+// would launch a browser. Inject an explicit "no credentials" instead.
+const NO_AUTH = { storageState: null, token: null, credentials: null, degraded: [] };
+
 const passing = () => ({ status: 'passed', durationMs: 5, artifacts: { screenshots: [], log: 'results/raw/x.log' } });
 
 // ── acceptance 1 — safe mode enforcement ─────────────────────────────────────
@@ -57,7 +61,7 @@ test('safe mode: 3 run, 2 mutation skipped, 1 failed-generation carried', async 
 
   let ran = 0;
   const res = await runExecute({ workspace: ws, runId: 'r1', mode: 'safe', allowlist: new Set(),
-    runnerFn: () => { ran += 1; return passing(); } });
+    auth: NO_AUTH, runnerFn: () => { ran += 1; return passing(); } });
   assert.equal(res.ok, true);
 
   const results = readResults(ws);
@@ -86,7 +90,7 @@ test('full mode runs mutations, but the safety floor still skips (no allowlist)'
 
   const touched = [];
   const res = await runExecute({ workspace: ws, runId: 'r1', mode: 'full', allowlist: new Set(),
-    runnerFn: (e) => { touched.push(e.scenarioId); return passing(); } });
+    auth: NO_AUTH, runnerFn: (e) => { touched.push(e.scenarioId); return passing(); } });
 
   const results = readResults(ws);
   assert.deepEqual(touched, ['sc-mut'], 'mutation runs in full mode; the floor scenario does not');
@@ -101,8 +105,67 @@ test('SAFETY_ALLOWLIST lets a specific floor scenario through, even in safe mode
 
   const touched = [];
   await runExecute({ workspace: ws, runId: 'r1', mode: 'safe', allowlist: new Set(['sc-danger']),
-    runnerFn: (e) => { touched.push(e.scenarioId); return passing(); } });
+    auth: NO_AUTH, runnerFn: (e) => { touched.push(e.scenarioId); return passing(); } });
   assert.deepEqual(touched, ['sc-danger']);
+});
+
+// ── auth: credentials reach the tests, and their absence is disclosed ────────
+
+test('the run\'s credentials are handed to every test it runs', async (t) => {
+  const manifest = { runId: 'r1', entries: [entry('sc-01')] };
+  const plan = { runId: 'r1', features: [{ featureId: 'feat:f', scenarios: [scenario('sc-01')] }] };
+  const ws = makeWorkspace(t, { manifest, plan });
+
+  let seen = null;
+  await runExecute({
+    workspace: ws, runId: 'r1', mode: 'safe', allowlist: new Set(),
+    auth: { storageState: '/tmp/auth-state.json', token: 'tok-123', degraded: [] },
+    runnerFn: (e, config) => { seen = config; return passing(); },
+  });
+
+  // the runner passes these into the child process, where harness.mjs turns them
+  // into ctx.storageState / ctx.authToken.
+  assert.equal(seen.storageState, '/tmp/auth-state.json');
+  assert.equal(seen.authToken, 'tok-123');
+  // …and the env aliases a generated test might reach for instead.
+  assert.equal(seen.env.AUTH_TOKEN, 'tok-123');
+  assert.equal(seen.env.BEARER_TOKEN, 'tok-123');
+  assert.equal(seen.env.STORAGE_STATE, '/tmp/auth-state.json');
+});
+
+test('missing auth is a disclosed degradation, not a stage failure', async (t) => {
+  const manifest = { runId: 'r1', entries: [entry('sc-01')] };
+  const plan = { runId: 'r1', features: [{ featureId: 'feat:f', scenarios: [scenario('sc-01')] }] };
+  const ws = makeWorkspace(t, { manifest, plan });
+
+  const res = await runExecute({
+    workspace: ws, runId: 'r1', mode: 'safe', allowlist: new Set(),
+    auth: { ...NO_AUTH, degraded: [{ useCase: 'auth', stage: 'execute', reason: 'no saved login', fallback: 'unauthenticated' }] },
+    runnerFn: () => passing(),
+  });
+
+  assert.equal(res.ok, true, 'the stage still runs — auth is not a gate');
+  assert.equal(res.degraded.length, 1);
+  assert.equal(res.degraded[0].useCase, 'auth');
+  // the test still ran; it just ran without credentials.
+  assert.equal(readResults(ws).summary.passed, 1);
+});
+
+test('a test with no credentials gets nulls, never a stale or invented token', async (t) => {
+  const manifest = { runId: 'r1', entries: [entry('sc-01')] };
+  const plan = { runId: 'r1', features: [{ featureId: 'feat:f', scenarios: [scenario('sc-01')] }] };
+  const ws = makeWorkspace(t, { manifest, plan });
+
+  let seen = null;
+  await runExecute({
+    workspace: ws, runId: 'r1', mode: 'safe', allowlist: new Set(),
+    auth: NO_AUTH,
+    runnerFn: (e, config) => { seen = config; return passing(); },
+  });
+
+  assert.equal(seen.storageState, null);
+  assert.equal(seen.authToken, null);
+  assert.equal(seen.env.AUTH_TOKEN, '');      // empty ⇒ harness.mjs yields null
 });
 
 // ── missing manifest / plan → hard stop ──────────────────────────────────────
@@ -130,7 +193,7 @@ test('real runner: passing test → passed, failing test → failed, no-run → 
   } });
 
   // real runChildProcess (runnerFn omitted).
-  const res = await runExecute({ workspace: ws, runId: 'r1', mode: 'safe', allowlist: new Set(), timeoutMs: 15_000 });
+  const res = await runExecute({ workspace: ws, runId: 'r1', mode: 'safe', allowlist: new Set(), auth: NO_AUTH, timeoutMs: 15_000 });
   assert.equal(res.ok, true);
 
   const byId = Object.fromEntries(readResults(ws).entries.map((e) => [e.scenarioId, e]));
@@ -166,7 +229,7 @@ export async function run() {
   const ws = makeWorkspace(t, { manifest, plan, files: { 'tests/feat:f/sc-hang.spec.mjs': hang } });
 
   const res = await runExecute({ workspace: ws, runId: 'r1', mode: 'safe', allowlist: new Set(),
-    timeoutMs: 800, env: { GC_PIDFILE: pidfile } });
+    auth: NO_AUTH, timeoutMs: 800, env: { GC_PIDFILE: pidfile } });
   assert.equal(res.ok, true);
 
   const e = readResults(ws).entries[0];

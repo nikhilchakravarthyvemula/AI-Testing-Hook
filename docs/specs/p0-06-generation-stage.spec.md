@@ -144,6 +144,21 @@ the session at the real context-server over the test's store — no extra wiring
   `.mjs` smoke tests (fetch the stored targets) so it needs nothing installed and
   always parse-checks. The live AGENT still writes richer Playwright specs; the
   template is the backstop, and p0-07 owns the runtime shape.
+- **One retry per slice, transient failures only** (added 2026-07-21, after a real
+  run lost 3 features to `claude timed out after 300000ms`). `engine-unavailable`
+  earns one more attempt (`GENERATE_SESSION_RETRIES`, default 1); `budget-exhausted`
+  and `honesty-failure` never do — the budget does not grow back, and a session
+  that ran to completion and wrote nothing will not decide differently on a rerun.
+  Mirrors the executor's "one retry, infrastructure only" rule (p0-07 §6).
+- **A dead session's finished files are kept** (`session.mjs`, same change). The
+  `ok:false` path previously returned before computing `filesWritten`, so a session
+  that wrote 4 of 6 files and then timed out reported none — and C6 templated over
+  all six, destroying real work. It now returns the partial list its own documented
+  failure shape already promised (`filesWritten?`), and C6 accumulates files ACROSS
+  attempts: each attempt's honesty diff only reports what appeared during it, so the
+  union is everything the slice produced. Without this, the retry would have made
+  things worse — attempt 2 re-writes files attempt 1 already made, they no longer
+  count as "new", and they'd be templated over.
 - **Manifest carries `sliceHash`** (beyond p0-00 §7) so resume can distinguish a
   current file from a stale one. Extra field; no validator rejects it.
 - **`featureId` dirs keep the raw id** (e.g. `tests/feat:checkout/`), consistent

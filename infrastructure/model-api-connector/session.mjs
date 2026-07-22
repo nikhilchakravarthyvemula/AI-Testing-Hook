@@ -115,11 +115,21 @@ export async function runSession(req) {
   const durationMs = Date.now() - startedAt;
 
   if (!result.ok) {
+    // A dead session may still have finished files before it died — a timeout
+    // KILLS a session, it does not rewind it. Report them (the ok:false shape
+    // above already documents `filesWritten`) so the caller can keep real work
+    // instead of templating over it. Each file is still parse-gated by C6.
+    const partial = [...listFiles(featureDir)].filter((f) => !before.has(f));
     appendLedger(workspace, sessionLine({
       slice, engine: provider, model: null, requests: 1, durationMs,
-      degraded: true, note: `A1 ${result.error}: ${result.detail}`,
+      degraded: true,
+      note: `A1 ${result.error}: ${result.detail}` +
+        (partial.length ? ` (${partial.length} partial file(s) kept)` : ''),
     }));
-    return { ok: false, error: 'engine-unavailable', detail: result.detail };
+    return {
+      ok: false, error: 'engine-unavailable', detail: result.detail,
+      filesWritten: partial.map((f) => path.join('tests', slice.featureId, f)),
+    };
   }
 
   // ── the honesty rule ──────────────────────────────────────────────────────
@@ -185,12 +195,40 @@ function buildSessionPrompt(slice, runId) {
   lines.push('');
   lines.push('EXECUTION CONTRACT — every file MUST follow it so the executor can run it:');
   lines.push('  - The file is a Node ESM module that exports `export async function run(ctx)`,');
-  lines.push('    where ctx = { baseUrl, shotDir, env }. It RESOLVES on success and THROWS on');
-  lines.push('    a test failure (an assertion that does not hold). No top-level side effects.');
+  lines.push('    where ctx = { baseUrl, shotDir, storageState, authToken, env }. It RESOLVES on');
+  lines.push('    success and THROWS on a test failure (an assertion that does not hold).');
+  lines.push('    No top-level side effects.');
   lines.push('  - UI/perf scenarios: `import { chromium } from \'playwright\'` (the library —');
   lines.push('    NOT @playwright/test, which is not installed), launch, navigate from ctx.baseUrl,');
   lines.push('    and on failure save a screenshot into ctx.shotDir. Always close the browser.');
   lines.push('  - api scenarios: use global `fetch` against ctx.baseUrl; assert on the response.');
+  lines.push('');
+  lines.push('AUTHENTICATION — the target is a real, logged-in application. Land on the');
+  lines.push('login page and your assertions describe the login page, not the feature.');
+  lines.push('  - api: send the bearer when there is one —');
+  lines.push('      const headers = ctx.authToken');
+  lines.push('        ? { Authorization: `Bearer ${ctx.authToken}` } : {};');
+  lines.push('  - UI/perf: SIGN IN FIRST, in the browser context, before asserting anything.');
+  lines.push('    Do not rely on ctx.storageState alone: an app may hold its token in memory,');
+  lines.push('    in which case a restored session authenticates nothing. Shape:');
+  lines.push('      const context = await browser.newContext(');
+  lines.push('        ctx.storageState ? { storageState: ctx.storageState } : {});');
+  lines.push('      const page = await context.newPage();');
+  lines.push('      await page.goto(new URL(\'/\', ctx.baseUrl).href);');
+  lines.push('      if (ctx.login && /login|signin/i.test(page.url())) {');
+  lines.push('        await page.fill(\'input[type=email]\', ctx.login.email);');
+  lines.push('        await page.fill(\'input[type=password]\', ctx.login.password);');
+  lines.push('        await page.click(\'button[type=submit]\');');
+  lines.push('        await page.waitForURL((u) => !/login|signin/i.test(u.href), { timeout: 30000 });');
+  lines.push('      }');
+  lines.push('    Then navigate to the page under test. VERIFY you are not on the login');
+  lines.push('    screen before asserting — a test that silently checks the login page is');
+  lines.push('    worse than one that fails.');
+  lines.push('  - ctx.authToken / ctx.login may be null. Then run unauthenticated and assert');
+  lines.push('    what is still meaningful (e.g. a protected endpoint answers 401/403, not 500)');
+  lines.push('    — do NOT fail the test merely because a credential was absent.');
+  lines.push('  - Never invent or hard-code credentials, and never print ctx.login in output,');
+  lines.push('    an error message, or a screenshot annotation.');
   lines.push('  - Generate mutation scenarios too — whether they actually RUN is decided later,');
   lines.push('    in code, not by you.');
   lines.push('');

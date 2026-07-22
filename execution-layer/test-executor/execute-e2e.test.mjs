@@ -45,6 +45,10 @@ function workspaceFor(t, scenario) {
   return ws;
 }
 
+// These tests exercise the RUNNER, not authentication: resolving auth for real
+// would launch a browser and poll a token that a local fixture server never sends.
+const NO_AUTH = { storageState: null, token: null, credentials: null, degraded: [] };
+
 const readResults = (ws) => JSON.parse(fs.readFileSync(path.join(ws, 'results', 'results.json'), 'utf8'));
 
 test('a C6 template test passes against a healthy live server', async (t) => {
@@ -56,7 +60,7 @@ test('a C6 template test passes against a healthy live server', async (t) => {
   const ws = workspaceFor(t, scenario);
 
   const res = await runExecute({ workspace: ws, runId: 'r1', mode: 'safe', allowlist: new Set(),
-    target: { url: baseUrl }, timeoutMs: 15_000 });
+    auth: NO_AUTH, target: { url: baseUrl }, timeoutMs: 15_000 });
   assert.equal(res.ok, true);
 
   const entry = readResults(ws).entries[0];
@@ -74,7 +78,7 @@ test('a C6 template test fails when the live server errors (5xx)', async (t) => 
   const ws = workspaceFor(t, scenario);
 
   await runExecute({ workspace: ws, runId: 'r1', mode: 'safe', allowlist: new Set(),
-    target: { url: baseUrl }, timeoutMs: 15_000 });
+    auth: NO_AUTH, target: { url: baseUrl }, timeoutMs: 15_000 });
 
   const entry = readResults(ws).entries[0];
   assert.equal(entry.status, 'failed', JSON.stringify(entry));

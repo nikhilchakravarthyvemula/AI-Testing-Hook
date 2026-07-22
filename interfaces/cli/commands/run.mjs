@@ -12,10 +12,11 @@
 // rendering. It owns the workspace, the stage sequence, the run record, and the
 // one human gate. See docs/specs/p0-01-run-spine.spec.md.
 //
-// Today generate/execute/report fail as "not implemented" — each lands with its
-// own spec (p0-06 … p0-08) and replaces its placeholder. A run today gets you a
-// real crawl, a real understanding, a per-run store, a reviewable test plan, and
-// an honest stop at (or just past) the human checkpoint.
+// All eight stages are implemented (p0-01 … p0-08): a run takes a target from a
+// real crawl through understanding, a per-run store, a reviewable test plan, the
+// human checkpoint, agent/template generation, safe/full execution against the
+// target, and a four-section HTML+PDF report — with a deterministic fallback at
+// every LLM touchpoint, so a report always comes out.
 
 import fs from 'node:fs';
 import path from 'node:path';

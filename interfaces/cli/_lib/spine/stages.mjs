@@ -33,6 +33,7 @@ import { buildStore } from '../../../../context-layer/knowledge-store/build.mjs'
 import { createPlan } from '../../../../generation-layer/test-plan-creator/create.mjs';
 import { runGenerate } from '../../../../generation-layer/test-generator/generate.mjs';
 import { runExecute } from '../../../../execution-layer/test-executor/execute.mjs';
+import { runReport } from '../../../../execution-layer/report-generator/render.mjs';
 
 // ── the registry ───────────────────────────────────────────────────────────
 
@@ -81,9 +82,9 @@ export const STAGES = [
   },
   {
     name: 'report',
-    failMode: 'abort',
+    failMode: 'abort',            // the report IS the product — no report, no run
     description: 'render the final report',
-    run: notImplemented('p0-08', 'execution-layer/report-generator/'),
+    run: report,
   },
 ];
 
@@ -414,6 +415,7 @@ async function generate(ctx) {
   ctx.io.out(`  ✓ generate: ${s.generated} agent + ${s.templated} template of ${s.scenarios} scenario(s) ` +
     `across ${s.features} feature(s)` +
     (s.failed > 0 ? `; ${s.failed} failed-generation` : '') +
+    (s.sessionRetries > 0 ? `; ${s.sessionRetries} session(s) retried` : '') +
     (s.slicesResumed > 0 ? `; ${s.slicesResumed} slice(s) resumed` : ''));
   return { ok: true };
 }
@@ -437,6 +439,7 @@ async function execute(ctx) {
 
   const result = await runExecute({
     workspace: ctx.dir,
+    repoRoot: ctx.repoRoot,          // locates the saved login (output/auth-state.json)
     runId: ctx.run.runId,
     mode: ctx.run.mode,
     target: { url: ctx.run.target.url },
@@ -445,9 +448,39 @@ async function execute(ctx) {
 
   if (!result.ok) return { ok: false, reason: result.reason };
 
+  // Missing or stale credentials degrade the run — every test still runs, but
+  // anything behind a login wall fails for a reason that has nothing to do with
+  // the app. The report has to say so, or those failures read as real bugs.
+  for (const d of result.degraded) markDegraded(ctx.dir, d);
+  if (result.degraded.length) ctx.run = readRun(ctx.dir);
+
   const s = result.stats;
   ctx.io.out(`  ✓ execute: ${s.passed} passed, ${s.failed} failed, ` +
     `${s.skippedMutation} skipped (mutation/safety), ${s.error} error`);
+  return { ok: true };
+}
+
+// ── report ─────────────────────────────────────────────────────────────────
+
+async function report(ctx) {
+  if (ctx.opts.dryRun) {
+    ctx.io.out('  (dry-run) render report/index.html (+ report.pdf) from the workspace');
+    return { ok: true };
+  }
+
+  const result = await runReport({
+    workspace: ctx.dir,
+    log: (m) => ctx.io.out(`  ${m}`),
+  });
+
+  if (!result.ok) return { ok: false, reason: result.reason };
+
+  // A missing PDF (no chromium) is a disclosed degradation, not a stage failure —
+  // the HTML report is the product and it was written.
+  for (const d of result.degraded) markDegraded(ctx.dir, d);
+  if (result.degraded.length) ctx.run = readRun(ctx.dir);
+
+  ctx.io.out(`  ✓ report: report/index.html${result.stats.pdf ? ' + report.pdf' : ' (PDF skipped)'}`);
   return { ok: true };
 }
 

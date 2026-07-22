@@ -17,6 +17,7 @@ import { classify } from './lib/enforce.mjs';
 import { parseAllowlist } from './lib/safety-floor.mjs';
 import { runChildProcess } from './lib/runner-child.mjs';
 import { resultEntry, summarize, writeResults } from './lib/results.mjs';
+import { resolveAuth, authEnv } from './lib/auth.mjs';
 
 const DEFAULT_TIMEOUT_MS = Number(process.env.TEST_TIMEOUT_MS || 120_000);
 const DEFAULT_MAX_MINUTES = Number(process.env.EXECUTE_MAX_MINUTES || 60);
@@ -52,11 +53,21 @@ export async function runExecute(ctx) {
   );
 
   const allowlist = ctx.allowlist ?? parseAllowlist(process.env.SAFETY_ALLOWLIST);
+  const baseUrl = ctx.target?.url ?? process.env.BASE_URL ?? null;
+
+  // Auth is resolved ONCE for the run, before any test runs: harvesting a token
+  // costs a browser launch, and every test needs the same credentials anyway.
+  // Missing/stale auth degrades — it never stops the stage (lib/auth.mjs).
+  const auth = ctx.auth ?? await resolveAuth({ repoRoot: ctx.repoRoot, baseUrl, log });
+  const degraded = [...(auth.degraded ?? [])];
+
   const config = {
     workspace: ctx.workspace,
-    baseUrl: ctx.target?.url ?? process.env.BASE_URL ?? null,
+    baseUrl,
     timeoutMs: ctx.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-    env: ctx.env ?? {},
+    storageState: auth.storageState ?? null,
+    authToken: auth.token ?? null,
+    env: { ...authEnv(auth), ...(ctx.env ?? {}) },
   };
 
   const deadline = Date.now() + (ctx.maxMinutes ?? DEFAULT_MAX_MINUTES) * 60_000;
@@ -93,7 +104,7 @@ export async function runExecute(ctx) {
   const summary = summarize(entries);
   writeResults(ctx.workspace, { runId: ctx.runId ?? manifest.runId ?? null, summary, entries });
 
-  return { ok: true, stats: summary, degraded: [] };
+  return { ok: true, stats: summary, degraded };
 }
 
 function readJson(p) {

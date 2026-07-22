@@ -113,6 +113,38 @@ skipped-mutation | error`.
   this contract; **re-verified live** — the real agent now emits `run()`-exporting
   files. The executor spawns a tiny `harness.mjs` that imports the file and calls
   `run()`; exit 0/1/2 → passed/failed/error(no-run-export).
+- **Authentication — built 2026-07-21** (`lib/auth.mjs`). §3 promised "`BASE_URL` +
+  the crawler's existing `LOGIN_*` conventions (storageState reuse)"; that was never
+  wired, so a real run against a login-walled app produced 25 failures that were all
+  the same missing credential, not app bugs. Now resolved ONCE per run, before any
+  test: `output/auth-state.json` (from `npm run login`) supplies the browser session,
+  and the bearer token is **harvested** — sign in, then read `Authorization: Bearer`
+  off the app's own requests. Deliberately not per-app configuration: it works
+  whatever the app names its token and wherever it keeps it, because it watches the
+  network rather than storage. `TEST_BEARER` / `AUTH_TOKEN` remain an escape hatch
+  for logins that will not automate (SSO/MFA). Extends the proven `captureToken()`
+  from `scripts/crawler/openapi-test-gen.mjs`.
+  - **Harvest signs in; it does not restore.** The first cut restored the saved
+    storage state and sniffed from there. Verified against the real target: that
+    app persists **nothing** — no cookie of its own, empty `sessionStorage`, and a
+    `localStorage.User` holding profile fields only. Its JWT lives in memory for the
+    tab's lifetime, so a restored session authenticates nothing and every test lands
+    on `/login`. Signing in works for that app AND for cookie/localStorage apps, so
+    it is the primary path; storage-state restore is the fallback when no
+    credentials are configured.
+  - **Credentials reach the test processes** (`ctx.login`), because a UI test on a
+    memory-token app has no other way to authenticate — it must perform the sign-in
+    itself. Operator-approved trade-off: `LOGIN_EMAIL`/`LOGIN_PASSWORD` are in the
+    child env and therefore reachable by generated test code, so the session prompt
+    forbids printing them in output, errors, or screenshots.
+  - **Contract:** `run(ctx)` gains `ctx.storageState` and `ctx.authToken` (both
+    nullable). C6's session prompt teaches it; the template generator sends the
+    bearer on its fetches. Env aliases (`AUTH_TOKEN`, `BEARER_TOKEN`, …) are set too,
+    since a generated test picks its own variable name.
+  - **Never a gate.** No login, a stale one, or a failed harvest all DEGRADE — the
+    stage still runs everything and the report discloses why. A stale session is
+    detected specifically (the target redirects to a sign-in URL) and reported once,
+    rather than surfacing as N confusing assertion failures.
 - **No orphans via process groups.** Children are spawned `detached` (own group);
   a timeout does `process.kill(-pid, 'SIGKILL')` to take the whole subtree
   (Chromium included). This is the E2B lesson applied to the local backend; the

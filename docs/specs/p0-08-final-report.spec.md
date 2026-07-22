@@ -1,9 +1,14 @@
 # P0-08 — Final Report · SPEC
 
-**Status:** Draft v1.0 (for review)
+**Status:** v1.1 — **IMPLEMENTED 2026-07-20** (`execution-layer/report-generator/`:
+`render.mjs` + `lib/{gather,layout,html,assets,pdf}.mjs` + `lib/sections/{results,
+coverage,appmap,transparency}.mjs`; wired as the spine `report` stage).
+`npm run test:report` — 6 tests (four-section render, self-containment, --yes
+disclosure, thin/degraded honesty, url-only, file write). All four acceptance
+criteria covered — see §4, §5. Whole-product e2e in `test/e2e/` (the real
+`runStages` loop → a report always comes out).
 **Depends on:** p0-03 (store: gaps, features, facts), p0-07 (results),
-p0-01 (run.json + ledger), existing `graph-viewer` shapers, existing
-`pdf-reporter` machinery
+p0-01 (run.json + ledger), existing `pdf-reporter` machinery (chromium `page.pdf()`)
 **Consumed by:** humans. This is the product.
 
 > One consolidated, self-contained deliverable per run: `report/index.html`
@@ -70,12 +75,39 @@ checkpoint record (approvedAt, `--yes` disclosure); stage timings.
 
 ## 4. Acceptance
 
-1. Full logtrim safe-mode run: all four sections populated; §B shows the
-   skipped mutation scenarios and untested endpoints; §D's numbers reconcile
-   exactly with `ledger.jsonl` line sums.
-2. Degraded run (mock engine): report still renders; §D lists every
-   fallback; §A shows template-generated provenance per test.
-3. URL-only profile: §B renders its "no codebase" explanations instead of
-   silently omitting audit rows.
-4. `index.html` opens from file:// with no network requests (verified via
-   devtools); PDF paginates sanely with screenshots included.
+1. ✅ **Four sections, real content, ledger reconciled.** Rendered from a full
+   model: §A shows pass/fail/skip with agent-vs-template provenance; §B shows the
+   shadow/untested gaps + whether a test exercised each + the safe-mode-withheld
+   mutations; §C the confidence-shaded feature inventory; §D sums `ledger.jsonl`
+   per use case (requests/cache/tokens) against the budget. (The full *logtrim
+   live* run is the P0 acceptance run, not a unit test.)
+2. ✅ **Degraded run.** `test/e2e/` drives the real spine with the mock engine and
+   no fixtures → template plan + template generation + real execution; a report
+   still comes out, §D lists every fallback (`S1/plan`, `A1/generate`), and §A
+   shows `template` provenance. Also proven with a real PDF (222 KB) end-to-end.
+3. ✅ **URL-only profile.** §B and §D render explicit "no codebase provided"
+   notes instead of silently omitting the declared-vs-observed audit.
+4. ✅ **Self-contained.** No `src`/`href` points off-box (asserted); CSS/JS inline;
+   screenshots inlined as `data:` URIs — so it opens from file:// with zero
+   requests. PDF is the same HTML via chromium `page.pdf()` with a print
+   stylesheet (verified: 222 KB, screenshots embedded).
+
+## 6. What we built — deviations & notes
+
+- **§C from store accessors, not the graph-viewer.** The report must be ONE
+  self-contained file (§3); embedding the interactive graph-viewer (a separate
+  multi-file tool) would break that. `listFeatures`/`featureContext` already give
+  the same feature→endpoints/pages join the shapers do, so §C renders as
+  confidence-shaded inventory tables. The graph-viewer stays available standalone.
+- **PDF is best-effort.** A missing/broken chromium degrades to HTML-only (a
+  disclosed degradation), never failing the `report` stage — the HTML is the
+  product, the PDF a shareable copy. `REPORT_SKIP_PDF=1` skips it for fast CI.
+- **`gather` is defensive by contract.** Every input is optional; a missing store/
+  results/plan becomes an honest empty section, so a thin or fully-degraded run
+  still produces a report (p0-00 acceptance 2). No input outside the workspace is
+  read (blank-slate).
+- **Deterministic, no LLM** (§1). Section renderers are pure `model → html`,
+  unit-tested without a browser; `runReport` only adds the fs write + PDF.
+- **`failed-generation` gets its own §A tile**, derived from results entries whose
+  `reason` is `failed-generation`, so generation losses read distinctly from
+  execution errors.

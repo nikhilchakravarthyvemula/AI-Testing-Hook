@@ -46,7 +46,16 @@ export function runChildProcess(entry, config) {
     try {
       child = spawn(process.execPath, [HARNESS, testAbs], {
         cwd: config.workspace,
-        env: { ...process.env, ...config.env, BASE_URL: config.baseUrl ?? '', SHOT_DIR: shotAbs },
+        env: {
+          ...process.env,
+          ...config.env,
+          BASE_URL: config.baseUrl ?? '',
+          SHOT_DIR: shotAbs,
+          // The run's credentials (lib/auth.mjs). A UI test opens its browser
+          // context with STORAGE_STATE; an API test sends AUTH_TOKEN as a bearer.
+          STORAGE_STATE: config.storageState ?? '',
+          AUTH_TOKEN: config.authToken ?? '',
+        },
         detached: true,          // new process group ⇒ we can kill the whole tree
         stdio: ['ignore', 'pipe', 'pipe'],
       });
