@@ -1,12 +1,9 @@
-// Strip <think>...</think> reasoning blocks from MiniMax-M2.7 responses.
+// Strip <think>...</think> reasoning blocks from LLM responses.
 //
-// MiniMax-M2.7 is a reasoning model — its `content` field begins with
+// Reasoning models emit a `content` field that begins with
 // `<think>…internal monologue…</think>` before the actual answer. We
 // JSON-parse the answer, so anything before the first `{` must go.
-//
-// Mirrors the Python shim at testo/harness/agentic_harness/tools/graphify/with_minimax.py so both
-// callers (crawler advisor here, graphify subprocess there) get clean
-// JSON from the same model.
+// Harmless for non-reasoning host models (no-op when no think block).
 
 const THINK_BLOCK_RE = /<think>.*?<\/think>\s*/gs;
 const OPEN_THINK_RE  = /<think>.*$/gs;   // unclosed (model hit max_tokens mid-think)

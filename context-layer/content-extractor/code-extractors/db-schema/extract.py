@@ -1,26 +1,20 @@
 """db-schema — code-extractor for database schemas (static source analysis).
 
 Lives under code-extractors/ because it discovers facts purely from static
-source (SQLAlchemy AST + an opt-in LLM pass over ORM/migration/SQL files) —
-it never connects to a live database. The framework-detector recommends it
-(catalog entry `db-schema`, wildcard `*any`) so it runs in stage 3 whenever a
-codebase is present, gated on TARGET_CODEBASE like every other code-extractor.
+source (SQLAlchemy AST parsing) — it never connects to a live database. The
+framework-detector recommends it (catalog entry `db-schema`, wildcard `*any`)
+so it runs in stage 3 whenever a codebase is present, gated on
+TARGET_CODEBASE like every other code-extractor.
 
-Runs both sub-extractors and merges into a single bundle:
+Fully deterministic (BYO-LLM architecture: no internal LLM):
 
   deterministic/extract.py — fast SQLAlchemy AST parser (no LLM, no cost)
-  llm/extract.py           — agentic catch-all (Django, Prisma, TypeORM,
-                              raw SQL migrations, etc.) via MiniMax-M2.7
 
-Both produce the same table shape; we merge by lowercased table name.
-When both find the same table, the higher-tier (ast) wins for the
-canonical column data and the LLM finding is kept as a corroborating
-observation.
+The `_merge` step is retained so a future host-routed enrichment pass can
+plug back in as a second observation source.
 
 Output: output/db-schema/bundle.json   (the file the indexer reads)
 Plus  : output/db-schema/deterministic.json   (raw deterministic output)
-        output/db-schema/llm.json             (raw LLM output)
-        output/db-schema/llm-raw.json         (the LLM's own JSON output)
 
 Env gating: TARGET_CODEBASE is required (the stage-3 code-extractor guard in
 run.mjs already enforces this). Without it, this still defends in depth by
@@ -44,7 +38,6 @@ OUT_DIR = REPO_ROOT / "output" / "db-schema"
 BUNDLE_FILE = OUT_DIR / "bundle.json"
 
 DETERMINISTIC_SCRIPT = _HERE / "deterministic" / "extract.py"
-LLM_SCRIPT           = _HERE / "llm" / "extract.py"
 PY_INTERPRETER       = REPO_ROOT / "context-layer" / "content-extractor" / "_lib" / ".venv" / "bin" / "python"
 
 # Tier ranking — higher number wins when both extractors disagree.
@@ -73,19 +66,11 @@ def main() -> int:
     # ── step 1: deterministic ─────────────────────────────────────────────
     det_bundle = _run_sub(DETERMINISTIC_SCRIPT, label="deterministic")
 
-    # ── step 2: LLM ────────────────────────────────────────────────────────
-    # The LLM step is opt-in via DBSCHEMA_LLM=1. It runs an agentic loop
-    # (read_file/grep/write_file) that can grind for 10-30+ minutes on a
-    # large codebase, often producing little incremental value over the
-    # deterministic SQLAlchemy/SQL parser. Default off so `testo scan`
-    # always terminates.
-    if os.environ.get("DBSCHEMA_LLM", "0") == "1":
-        llm_bundle = _run_sub(LLM_SCRIPT, label="llm")
-    else:
-        print("[db-schema] LLM enrichment skipped (set DBSCHEMA_LLM=1 to enable)", flush=True)
-        llm_bundle = None
+    # BYO-LLM: no internal LLM enrichment pass. _merge tolerates None and a
+    # future host-routed pass can slot back in as the second source.
+    llm_bundle = None
 
-    # ── step 3: merge into bundle.json ────────────────────────────────────
+    # ── step 2: merge into bundle.json ────────────────────────────────────
     merged = _merge(det_bundle, llm_bundle)
     BUNDLE_FILE.write_text(json.dumps({
         "sourceId":      "db-schema",

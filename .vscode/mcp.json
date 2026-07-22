@@ -1,0 +1,18 @@
+{
+  "servers": {
+    "ai-hook": {
+      "type": "stdio",
+      "command": "${workspaceFolder}/context-layer/content-extractor/_lib/.venv/bin/python",
+      "args": ["-m", "ai_hook_mcp.server"],
+      "cwd": "${workspaceFolder}/mcp-server",
+      "env": {
+        "AI_HOOK_ROOT": "${workspaceFolder}"
+      }
+    },
+    "testo-context": {
+      "type": "stdio",
+      "command": "${workspaceFolder}/context-layer/content-extractor/_lib/.venv/bin/python",
+      "args": ["${workspaceFolder}/byo-llm-poc/mcp_server.py"]
+    }
+  }
+}

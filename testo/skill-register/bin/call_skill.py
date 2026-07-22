@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """Internal CLI — invoke a registered skill through SkillService.
 
-Mirrors `testo/harness/bin/call_tool.py`. End users
-should prefer the higher-level `testo` commands; this CLI is for
-plumbing (testo generate, scripts, smoke tests).
+The deterministic skill runtime's front door: the MCP server
+(mcp-server/ai_hook_mcp) and byo-llm-poc/ctx.mjs shell this for
+generate/execute; also handy for scripts and smoke tests.
 
 Usage:
     python call_skill.py <SKILL> [--mode direct] [--<arg> <value>] ...
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -86,6 +87,12 @@ def main() -> int:
         choices=tuple(m.value for m in SkillInvocationMode),
         default=SkillInvocationMode.DIRECT.value,
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="emit_json",
+        help="Emit the structured result as a single machine-readable marker line.",
+    )
     known, extras = parser.parse_known_args()
     skill_args = _parse_extras(extras)
 
@@ -110,6 +117,12 @@ def main() -> int:
 
     service = SkillService()
     result = asyncio.run(service.invoke_direct(skill, args_obj))
+
+    if known.emit_json:
+        # Stable, single-line channel for programmatic callers (e.g. the MCP
+        # server): the skill's structured result, not the human log stream.
+        payload = {"ok": result.ok, "status": result.status.value, **result.metadata}
+        print("[call_skill:result] " + json.dumps(payload), flush=True)
 
     print(
         f"\n[call_skill] mode={result.mode.value} ok={result.ok} status={result.status.value}",

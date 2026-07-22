@@ -1,6 +1,6 @@
 """Enums used across the skill-register service layer.
 
-Mirrors `agentic_harness.enums` deliberately — the two services share
+Mirrors the retired agentic_harness enums (spec-13) — kept so callers share
 the direct/agent invocation mental model, so the surface shapes match.
 """
 

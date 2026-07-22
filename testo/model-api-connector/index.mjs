@@ -1,25 +1,25 @@
 // Model API connector — public entrypoint.
 //
-// Single function: `getClient(provider)`. Pass "minimax" today; this
-// is the seam where future providers (gemini, openai, claude, ollama)
-// register the same way without callers having to know which one they
-// got.
+// Single function: `getClient(provider)`. BYO-LLM: the only provider is
+// "host" — chat() routes to the MCP host model (VS Code Copilot / Claude
+// Code) through the sampling bridge. No API keys live in this repo. This
+// is the seam where future providers would register the same way without
+// callers having to know which one they got.
 //
 // Usage:
 //
 //   import { getClient } from './testo/model-api-connector/index.mjs';
-//   const llm = getClient('minimax');
+//   const llm = getClient('host');
 //   const res = await llm.chat({
 //     messages: [{ role: 'user', content: 'Say hi in one sentence.' }],
 //   });
 //   console.log(res.content, res.usage);
 
 export { CONNECTOR_SCHEMA_VERSION } from './types.mjs';
-import { createMiniMaxClient } from './providers/minimax.mjs';
+import { createHostClient } from './providers/host.mjs';
 
 const PROVIDERS = {
-  minimax: createMiniMaxClient,
-  // future: gemini, openai, claude, ollama
+  host: createHostClient,   // BYO-LLM: routes chat() to the MCP host model via the sampling bridge
 };
 
 /**

@@ -6,9 +6,9 @@
 
 export const temperature = 0;
 export const maxTokens   = 4096;
-// MiniMax-M2.7 with strict-JSON output + ~20 clickables per page +
-// big nav menus regularly takes 40-90s. 30s was too tight and
-// caused every page to time out on rich dashboards.
+// Strict-JSON output + ~20 clickables per page + big nav menus regularly
+// takes 40-90s per LLM round. 30s was too tight and caused every page to
+// time out on rich dashboards.
 export const timeoutMs   = 120_000;
 
 export const CATEGORIES = Object.freeze([
@@ -70,8 +70,8 @@ export function buildMessages(input) {
         `Page URL:   ${url}\nPage title: ${title ?? '(none)'}\n` +
         `Page kind:  ${input.section ?? '(unknown section)'}\n\n` +
         (contextSnippet
-          // Tight context — every extra K of prompt slows MiniMax-M2.7
-          // by ~5s, and the clickables JSON below carries the real signal.
+          // Tight context — every extra K of prompt slows the LLM round,
+          // and the clickables JSON below carries the real signal.
           ? `Context excerpt:\n${truncate(contextSnippet, 400)}\n\n`
           : '') +
         `Clickables (${numbered.length}):\n` +

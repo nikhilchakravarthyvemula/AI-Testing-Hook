@@ -16,7 +16,7 @@
 export const temperature = 0;
 export const maxTokens   = 4096;
 // Modest timeout — page snapshots are small and we want the walker to
-// keep moving if MiniMax is sluggish. The heuristic guardrail still
+// keep moving if the LLM is sluggish. The heuristic guardrail still
 // provides obvious clickables if this times out.
 export const timeoutMs   = 60_000;
 

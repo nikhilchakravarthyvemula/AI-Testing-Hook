@@ -1,0 +1,18 @@
+[project]
+name = "ai-hook-mcp"
+version = "0.0.1"
+description = "MCP server exposing the AI testing-hook pipeline to MCP hosts via MCP sampling (BYO-LLM)."
+requires-python = ">=3.10"
+dependencies = [
+  "mcp>=1.0",
+]
+
+[project.scripts]
+ai-hook-mcp = "ai_hook_mcp.server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["ai_hook_mcp"]

@@ -1,44 +1,67 @@
-# Testing Harness
+# AI Testing Hook — BYO-LLM monorepo
 
-Project layout mirrors the **AI-Based Automated Testing Hook** architecture
-diagram. Each top-level folder corresponds 1:1 to a box on the diagram.
+An architecture-shaped testing hook: point it at a live web app (plus,
+optionally, its codebase) and it crawls, extracts, indexes, generates API
+tests, and executes them — with **the host model doing all LLM reasoning**.
 
-## Folder ↔ diagram mapping
+**LLM strategy: BYO-LLM.** There are **no API keys in this repo** and no
+internal LLM orchestration. The reasoning steps (click-intent classification)
+run on whatever model the developer already has — VS Code Copilot via the MCP
+server's sampling bridge, or Claude Code via the `/ctx` skill. Everything else
+in the pipeline is deterministic.
+
+## Front doors
+
+| Surface | Where | How the LLM connects |
+|---|---|---|
+| **MCP server** (`ai-hook`) | `mcp-server/` — tools `test_app` (narrated end-to-end run), `scan`, `generate`, `execute`, `context` | MCP **sampling**: the crawler's own LLM calls route through a loopback bridge → `create_message` → the host model |
+| **Claude Code skill** (`/ctx`) | `.claude/skills/testo-context/` over `byo-llm-poc/ctx.mjs` | The host classifies clickables itself and writes them back (`annotate-intents`) |
+
+## Folder map
 
 ```
-testing Harness/
+├── mcp-server/                 ▼ the MCP front door (FastMCP + sampling bridge)
+│   ├── ai_hook_mcp/              server.py (5 tools) · bridge.py · milestones.py (narration)
+│   └── docs/ARCHITECTURE.md      how the inversion works, hop by hop
 │
-├── testo/                      ▼ interactive REPL + shared packages
-│   ├── repl.py                   Claude-CLI-style front door (/scan /generate /crawl …)
-│   ├── harness/                  agentic_harness (OpenHarness tool-calling engine)
-│   ├── skill-register/           skill registry + call_skill.py
-│   └── model-api-connector/      pluggable LLM client (MiniMax)
+├── byo-llm-poc/                ▼ the skill front door (deterministic CLI)
+│   └── ctx.mjs                   scan / annotate-intents / context / generate / execute
 │
-├── context-layer/              ▼ Context Layer (purple)
-│   ├── content-extractor/        the orchestrator — wraps source extractors
-│   ├── gap-analyzer/             spec vs observed diff, missing-coverage detection
-│   ├── knowledge-synthesizer/    multi-source fact reconciliation
-│   ├── feature-extractor/        clusters endpoints + pages into features
-│   └── mind-map-builder/         Mermaid + interactive HTML graphs
+├── testo/                      ▼ shared runtimes
+│   ├── skill-register/           skill registry + call_skill.py (--json result marker)
+│   └── model-api-connector/      getClient('host') — the single LLM seam (no keys)
 │
-├── generation-layer/           ▼ Generation Layer (pink)
-│   ├── test-plan-creator/        builds explicit test-plan.json
-│   ├── test-script-generator/    emits Playwright .spec.mjs files
-│   ├── mock-data-creator/        field-type defaults + config overrides
-│   └── validator/                ESLint + parse-check + diff vs previous
+├── context-layer/              ▼ Context Layer
+│   ├── content-extractor/        orchestrator (run.mjs) — crawler, graphify (direct,
+│   │                             deterministic), framework-detector, code-extractors
+│   └── indexer/                  merges source bundles → output/indexed_output/ topics
 │
-├── execution-layer/            ▼ Execution Layer (green)
-│   ├── test-executor/            wraps `playwright test`
-│   └── report-generator/         unified HTML dashboard
+├── generation-layer/           ▼ Generation Layer
+│   ├── api-test-generator/       deterministic curl-test builder + runner (skill)
+│   ├── ui-test-generator/        scenario-driven Playwright specs
+│   ├── perf-test-generator/      perf scripts
+│   └── allure-reporter/ pdf-reporter/  reporting
 │
-├── feedback/                   ▼ feedback arrow
-│                                 test results → output/ (future: Postgres/graph/bucket
-│                                 via storage skills — docs/spec-10)
-│
-├── output/                     runtime artifacts (gitignored)
-└── tests/                      generated Playwright tests
+├── execution-layer/            ▼ Execution Layer (report-generator stub)
+├── feedback/                   ▼ feedback arrow (future: storage skills — docs/spec-10)
+├── docs/                       spec-04 … spec-14 (design history; spec-13/14 = this shape)
+└── output/                     runtime artifacts (gitignored)
 ```
+
+## Quick start (VS Code Copilot)
+
+1. Open this folder in VS Code — `.vscode/mcp.json` registers the `ai-hook` server.
+2. Copilot Chat → Agent mode → ask: *"test my app at http://localhost:3000,
+   codebase /path/to/repo"* → the `test_app` tool runs the narrated loop:
+   scanner → crawler (LLM calls sampled to Copilot) → graphify → indexer →
+   generator → executor → summary.
+3. First sampling call prompts for approval (Copilot Business/Enterprise needs
+   the MCP policy enabled by an admin).
+
+Retired in the BYO-LLM migration (spec-13): the internal agentic harness +
+REPL (`testo/harness`, `testo/repl.py`), the MiniMax provider, and every
+`MINIMAX_*` / `LLM_FRAMEWORK_DETECTION` / `DBSCHEMA_LLM` env knob.
 
 ## Build status
 
-Tracked in `TODO.md` and per-folder READMEs.
+Run the `progress` workflow for a per-spec report, or see `TODO.md`.

@@ -8,17 +8,12 @@ Public surface:
   * `IFrameworkExtractor`              — Protocol for detectors.
   * `FrameworkDetectionResult`         — output shape.
   * `DeterministicFrameworkDetector`   — fast, free, signal-based detection.
-  * `LLMFrameworkDetector`             — agentic detection (catches edge cases).
-  * `CompositeFrameworkDetector`       — runs deterministic, then LLM if thin.
-  * `LLMTrigger`                       — ALWAYS / AUTO / NEVER for the LLM pass.
 
-Default in `extract.py` is the composite with AUTO trigger.
+Detection is fully deterministic (BYO-LLM architecture: no internal LLM).
 """
 
-from .composite import CompositeFrameworkDetector, LLMTrigger
 from .detector import DeterministicFrameworkDetector
 from .interfaces import IFrameworkExtractor
-from .llm_detector import LLMFrameworkDetector
 from .models import (
     DetectedFramework,
     DetectedLanguage,
@@ -35,7 +30,4 @@ __all__ = [
     "DetectionSignal",
     "SignalKind",
     "DeterministicFrameworkDetector",
-    "LLMFrameworkDetector",
-    "CompositeFrameworkDetector",
-    "LLMTrigger",
 ]

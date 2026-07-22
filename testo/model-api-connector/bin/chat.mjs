@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 // Smoke test for the model-api-connector.
 //
-//   node testo/model-api-connector/bin/chat.mjs minimax "Say hi in one sentence."
+//   node testo/model-api-connector/bin/chat.mjs host "Say hi in one sentence."
 //
-// Loads <repo>/.env first so MINIMAX_API_KEY is picked up automatically.
-// Prints the model's reply and a one-line usage summary.
+// The "host" provider needs a sampling bridge: SAMPLING_BRIDGE_URL and
+// SAMPLING_TOKEN must be set (normally exported by the MCP server when it
+// spawns the pipeline). Loads <repo>/.env first, then prints the model's
+// reply and a one-line usage summary.
 
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,7 +20,7 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 loadRepoEnv(REPO_ROOT);
 
 const [, , providerArg, ...promptParts] = process.argv;
-const provider = providerArg ?? 'minimax';
+const provider = providerArg ?? 'host';
 const prompt = promptParts.join(' ').trim() || 'Say hi in one short sentence.';
 
 if (!listProviders().includes(provider)) {

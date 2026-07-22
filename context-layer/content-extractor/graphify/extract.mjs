@@ -1,9 +1,10 @@
-// Graphify source extractor — thin wrapper around context-layer/content-extractor/graphify/.
+// Graphify source extractor — thin wrapper around the `graphifyy` pip tool.
 //
-// Shells out to the existing graphify tool (LLM-enriched code knowledge
-// graph) against TARGET_CODEBASE, then emits a normalized source-bundle
-// JSON at output/graphify/bundle.json that points at the produced
-// graph.json.
+// Invokes graphify DIRECTLY (deterministic AST extraction + clustering +
+// report; "no LLM needed") against TARGET_CODEBASE, then emits a normalized
+// source-bundle JSON at output/graphify/bundle.json that points at the
+// produced graph.json. The LLM-semantic labeling pass is intentionally not
+// wired (no Python host-routing yet) — `graphify update` is LLM-free.
 //
 // The hand-rolled deterministic Python AST extractor (python-ast/) is a
 // SEPARATE auto-discovered source now — this wrapper no longer runs it.
@@ -34,58 +35,40 @@ if (!fs.existsSync(TARGET_CODEBASE)) {
 // GRAPH_TREE.html, etc.) so all graphify-produced output is in one
 // folder for the indexer + downstream consumers to read from.
 const OUT_DIR = path.join(REPO_ROOT, 'output', 'graphify');
-// The graphify harness tool lives under testo/harness/ now; this adapter just
-// invokes it via call_tool.py on the shared _lib venv.
-const HARNESS_PY = path.join(REPO_ROOT, 'context-layer', 'content-extractor', '_lib', '.venv', 'bin', 'python');
-const AGENTIC_HARNESS_BIN = path.join(REPO_ROOT, 'testo', 'harness', 'bin', 'call_tool.py');
+const PY = path.join(REPO_ROOT, 'context-layer', 'content-extractor', '_lib', '.venv', 'bin', 'python');
+// GRAPHIFY_OUT (absolute) makes the tool write graph.json/report/html here
+// directly — no tmp-shuffle needed.
 const GRAPHIFY_OUT = process.env.GRAPHIFY_OUT_DIR
   || path.join(REPO_ROOT, 'output', 'graphify');
-
-// Honour AGENTIC_MODE env var: "direct" (default, fast + reliable) or
-// "agent" (LLM picks the tool — useful for testing the agent loop).
-const AGENTIC_MODE = (process.env.AGENTIC_MODE ?? 'direct').toLowerCase();
-if (!['direct', 'agent'].includes(AGENTIC_MODE)) {
-  console.error(`[graphify] AGENTIC_MODE must be "direct" or "agent", got: ${AGENTIC_MODE}`);
-  process.exit(2);
-}
 
 fs.mkdirSync(OUT_DIR, { recursive: true });
 
 const graphPath = path.join(GRAPHIFY_OUT, 'graph.json');
 // Snapshot the run's start time so we can later check whether graph.json
-// was actually re-written during THIS run. We had a real bug where the
-// LLM-agent layer hallucinated a tool call, the tool was never invoked,
-// but the wrapper still found a stale graph.json on disk and reported
-// "ok=true, 658 nodes" — that 658 was from 24 minutes earlier.
+// was actually re-written during THIS run. A stale file on disk must not
+// be reported as a fresh, successful extraction.
 const runStartMs = Date.now();
 
-console.log(`[graphify] invoking via agentic-harness (mode=${AGENTIC_MODE})…`);
+console.log('[graphify] invoking graphify directly (deterministic update + tree)…');
 let ok = false;
 let error = null;
 try {
-  // Route through the agentic-harness service rather than calling
-  // testo/harness/agentic_harness/tools/graphify/tool.py directly. The service owns LLM backend
-  // selection + the direct-vs-agent split.
-  const argv = [
-    AGENTIC_HARNESS_BIN,
-    'graphify',
-    '--mode', AGENTIC_MODE,
-  ];
-  if (AGENTIC_MODE === 'direct') {
-    argv.push('--path', TARGET_CODEBASE);
-  } else {
-    // agent mode needs a free-text prompt; the LLM extracts the path.
-    argv.push('--prompt', `Run graphify on ${TARGET_CODEBASE}`);
-  }
-  execFileSync(
-    HARNESS_PY,
-    argv,
-    {
-      cwd: REPO_ROOT,
-      env: { ...process.env, GRAPHIFY_OUT_DIR: GRAPHIFY_OUT },
-      stdio: 'inherit',
-    },
-  );
+  const spawnOpts = {
+    // cwd=output/ so the tool's cwd-relative strays (graphify-out/manifest.json,
+    // .graphify_root) land inside the gitignored output/ folder.
+    cwd: path.join(REPO_ROOT, 'output'),
+    env: { ...process.env, GRAPHIFY_OUT, GRAPHIFY_NO_TIPS: '1' },
+    stdio: 'inherit',
+  };
+  // `update` = full deterministic pass: AST extract + build + cluster +
+  // GRAPH_REPORT.md + graph.json + graph.html. --force bypasses the
+  // fewer-nodes regression guard (output/ is wiped each run anyway).
+  execFileSync(PY, ['-m', 'graphify', 'update', TARGET_CODEBASE, '--force'], spawnOpts);
+  execFileSync(PY, ['-m', 'graphify', 'tree',
+    '--graph', graphPath,
+    '--output', path.join(GRAPHIFY_OUT, 'GRAPH_TREE.html'),
+    '--root', TARGET_CODEBASE,
+  ], spawnOpts);
   ok = true;
 } catch (e) {
   error = e.message;

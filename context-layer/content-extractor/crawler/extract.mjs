@@ -102,7 +102,7 @@ async function annotateClickableIntents(pages) {
   let annotatedIntents = 0;
   let failedBatches = 0;
   const t0 = Date.now();
-  // MiniMax-M2.7 is slow on big prompts. Chunking ~15 clickables per
+  // LLM round-trips are slow on big prompts. Chunking ~15 clickables per
   // call keeps each LLM round under ~60s and lets a single timeout
   // on a noisy page not poison the whole page's annotations.
   const BATCH_SIZE = 15;
@@ -112,7 +112,7 @@ async function annotateClickableIntents(pages) {
   const workable = pages.filter(p => _flattenClickables(p.clickables).length > 0);
   console.log(
     `[crawler] intent-extract: ${workable.length}/${pages.length} pages have clickables ` +
-    `(LLM batch size ${BATCH_SIZE}, ~30-60s per batch on MiniMax-M2.7)`
+    `(LLM batch size ${BATCH_SIZE}, ~30-60s per batch on the host model)`
   );
 
   let pageIdx = 0;

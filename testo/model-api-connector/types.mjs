@@ -37,7 +37,7 @@
  * @property {string}     [finishReason] "stop" | "length" | "tool_call" | ...
  * @property {string}     model
  * @property {ChatUsage}  [usage]
- * @property {string}     provider      stable id, e.g. "minimax"
+ * @property {string}     provider      stable id, e.g. "host"
  * @property {object}     [raw]         provider-native response body for debugging
  */
 

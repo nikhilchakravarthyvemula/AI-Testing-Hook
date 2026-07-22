@@ -1,5 +1,6 @@
 # Spec 07 — `testo` as an interactive testing harness (Claude-CLI-like REPL)
 
+> **Superseded (spec-13, 2026-07-22):** the internal harness/REPL was removed in the BYO-LLM migration — the host model is the agent now. See `mcp-server/docs/ARCHITECTURE.md`. Kept for design history.
 _Target: **Infrastructure** (agentic-harness) + **Interfaces** (`testo`)._
 
 > **Goal:** using the harness should feel like Claude Code — an interactive REPL where you

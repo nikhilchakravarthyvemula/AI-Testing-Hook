@@ -1,5 +1,6 @@
 # Spec 05 — Make every functionality an agent-callable tool (harness as runtime)
 
+> **Superseded (spec-13, 2026-07-22):** the internal harness/REPL was removed in the BYO-LLM migration — the host model is the agent now. See `mcp-server/docs/ARCHITECTURE.md`. Kept for design history.
 _Target: **Infrastructure** (agentic-harness, skill-register, model-api-connector) +
 **Interfaces** (`testo`), wrapping every Context / Generation / Execution functionality._
 

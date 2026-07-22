@@ -1,10 +1,9 @@
 """IFrameworkExtractor — contract for "scan a codebase, tell me what it uses".
 
-Two implementations are planned:
-  * DeterministicFrameworkDetector  — file extensions + manifest files (today)
-  * LLMFrameworkDetector            — agentic-harness asks an LLM (future)
+One implementation today:
+  * DeterministicFrameworkDetector  — file extensions + manifest files
 
-Both produce a FrameworkDetectionResult. Downstream consumers (the
+Any detector produces a FrameworkDetectionResult. Downstream consumers (the
 orchestrator) don't care which detector ran — they just read the result
 and pick code-extractors that match.
 """

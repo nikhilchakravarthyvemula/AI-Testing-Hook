@@ -5,9 +5,10 @@
 // to `null` on any failure (timeout, missing key, invalid JSON, etc.)
 // so the crawler can keep its deterministic path when the LLM is sick.
 //
-// The advisor itself is stateless — it owns the MiniMax client and a
-// small JSON-validation step per decision kind. Prompt files live in
-// sibling modules (auth-detector.mjs, intent-extract.mjs, …).
+// The advisor itself is stateless — it owns the LLM client (the "host"
+// provider: the MCP host model via the sampling bridge) and a small
+// JSON-validation step per decision kind. Prompt files live in sibling
+// modules (auth-detector.mjs, intent-extract.mjs, …).
 
 import path from 'node:path';
 import fs from 'node:fs';
@@ -45,19 +46,24 @@ function ensureEnvLoaded() {
 
 // ── client cache ───────────────────────────────────────────────────────────
 //
-// Build a single MiniMax client per process and reuse it. fetch() in
-// Node 18+ already pools sockets, so this is mostly about avoiding the
-// "missing API key" check on every call.
+// Build a single client per process and reuse it. fetch() in Node 18+
+// already pools sockets, so this is mostly about avoiding the missing-
+// bridge check on every call.
 
 let _client = null;
-function getMiniMaxClient() {
+// LLM_PROVIDER selects the backend. 'host' (the only registered provider —
+// BYO-LLM, routes to the MCP host model via the sampling bridge) is the
+// default. With no bridge env present the client construction fails and the
+// advisor returns null → the crawler keeps its deterministic path.
+function getLlmClient() {
   ensureEnvLoaded();
   if (_client) return _client;
+  const provider = process.env.LLM_PROVIDER || 'host';
   try {
-    _client = getClient('minimax');
+    _client = getClient(provider);
     return _client;
   } catch (e) {
-    console.warn(`[llm-advisor] MiniMax client unavailable: ${e.message}`);
+    console.warn(`[llm-advisor] ${provider} client unavailable: ${e.message}`);
     return null;
   }
 }
@@ -88,7 +94,7 @@ function llmEnabled() {
  */
 export async function adviseOn(req) {
   if (!llmEnabled()) return null;
-  const client = getMiniMaxClient();
+  const client = getLlmClient();
   if (!client) return null;
 
   const handler = HANDLERS[req.kind];
@@ -152,4 +158,4 @@ const HANDLERS = {
 
 // ── small helpers exposed for tests ────────────────────────────────────────
 
-export { getMiniMaxClient, llmEnabled, ensureEnvLoaded };
+export { getLlmClient, llmEnabled, ensureEnvLoaded };

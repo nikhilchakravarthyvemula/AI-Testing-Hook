@@ -1,7 +1,8 @@
 # LLM Advisor
 
-A tiny seam between the deterministic crawler and MiniMax-M2.7. Called at
-the few decision-points where rules fail today.
+A tiny seam between the deterministic crawler and the HOST model (BYO-LLM:
+`getClient('host')` → sampling bridge → the MCP host's LLM). Called at the
+few decision-points where rules fail today.
 
 ## Decision kinds
 
@@ -31,14 +32,17 @@ rule-based path when the advisor returns null.
 | Var | Effect |
 |---|---|
 | `CRAWLER_LLM=0` | disables the advisor entirely (deterministic regression mode) |
-| `MINIMAX_API_KEY` | loaded from `<repo>/.env` if not in process env |
-| `MINIMAX_MODEL` | model override; default `MiniMax-M2.7` |
-| `MINIMAX_REGION` | `global` (default) or `cn` |
+| `LLM_PROVIDER` | provider selection; default `host` (the only registered provider) |
+| `SAMPLING_BRIDGE_URL` | loopback URL of the MCP server's sampling bridge (required for `host`; the MCP server sets it) |
+| `SAMPLING_TOKEN` | correlates this pipeline run to the in-flight MCP request |
+
+With no bridge present the client can't be built → the advisor returns `null`
+→ the crawler keeps its deterministic path.
 
 ## Design constraints
 
 * **Never blocks the crawl for more than `timeoutMs`.** Default 25 s per decision.
-* **Strips `<think>…</think>`** from every response (MiniMax-M2.7 is a reasoning model). See `strip-think.mjs`.
+* **Strips `<think>…</think>`** from every response (harmless no-op for non-reasoning host models). See `strip-think.mjs`.
 * **Validates** each response against a per-kind schema. Unvalidated fields default to safe values (e.g. `safeToClick: true`).
 * **Stateless** — no caching across calls (yet). The decisions are
   cheap and rare enough that page-level caching is the next thing to add
