@@ -5,7 +5,7 @@
   "private": true,
   "description": "Architecture-shaped testing harness. See README.md for folder → diagram mapping.",
   "scripts": {
-    "login": "BASE_URL=$(node -p \"require('./scenario.json').baseUrl\") SEED_PATH=/ node context-layer/content-extractor/crawler/login-once.mjs",
+    "login": "SEED_PATH=/ node context-layer/content-extractor/crawler/login-once.mjs",
     "test:ui": "node generation-layer/ui-test-generator/gen.mjs scenario.json",
     "test:perf": "node generation-layer/perf-test-generator/gen.mjs scenario.json",
     "report:build": "node generation-layer/allure-reporter/build.mjs",

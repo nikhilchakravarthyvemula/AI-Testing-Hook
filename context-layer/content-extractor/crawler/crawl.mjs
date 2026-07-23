@@ -642,6 +642,46 @@ async function recordPage(page, requestedUrl, navStatus, phase = 'crawl', extra 
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// ── SSO session recovery — the refresh-cookie race ───────────────────────
+//
+// Apps that keep the ACCESS token in memory and mint it from an httpOnly
+// REFRESH cookie (e.g. `surface_refresh`) via `POST /oidc/refresh` bounce a
+// HARD navigation to /login whenever the route guard checks for a token
+// BEFORE the silent refresh XHR returns. There is no form to fill (it's
+// SSO), so `maybeLogin` correctly gives up — but the session is perfectly
+// valid. We recover by letting the refresh settle and RE-navigating the
+// intended route (the refresh cookie is re-sent each time). This is why a
+// route reached by an in-app click worked but a direct goto bounced.
+async function recoverSession(page, intendedUrl, log) {
+  if (!authState) return false;                    // nothing saved → can't recover, fall back to form login
+  const say = (m) => (log?.info ?? console.log).call(log || console, m);
+  const target = intendedUrl || page.url();
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+    // Win the race: wait for EITHER the auth/refresh XHR to return OR the
+    // URL to leave the login route, whichever happens first.
+    await Promise.race([
+      page.waitForResponse(
+        r => /oidc\/refresh|\/auth\b|\/token\b|\/session\b|\/refresh\b/i.test(r.url()) && r.status() < 400,
+        { timeout: 8_000 },
+      ).catch(() => {}),
+      page.waitForFunction(
+        () => !/\/(login|signin|sign-in|sso)\b/i.test(location.pathname),
+        { timeout: 8_000 },
+      ).catch(() => {}),
+    ]);
+    await waitForUrlStable(page).catch(() => {});
+    if (!LOGIN_URL_REGEX.test(page.url())) {
+      say(`[auth] session recovered (attempt ${attempt}) → ${page.url()}`);
+      return true;
+    }
+    await page.waitForTimeout(1_000);
+  }
+  say(`[auth] session recovery exhausted after 3 attempts — still at ${page.url()} ` +
+      `(auth-state.json may be expired; re-run \`npm run login\`)`);
+  return false;
+}
+
 // Shared helper: inject saved auth-state.json cookies + localStorage into
 // a fresh BrowserContext. The walker calls this once per worker context
 // during onContextReady.
@@ -737,8 +777,11 @@ if (CRAWL_DISABLED) {
       await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
       await waitForUrlStable(page);
       if (/\/(login|signin|sign-in|auth|sso)\b/i.test(page.url())) {
-        console.log(`[interact] w${workerId} redirected to ${page.url()} — running maybeLogin`);
-        await maybeLogin(page, console);
+        console.log(`[interact] w${workerId} redirected to ${page.url()} — recovering session`);
+        // Saved SSO session → wait for the refresh-cookie token to settle and
+        // retry; only fall back to form-fill when there's no saved session.
+        const recovered = await recoverSession(page, `${BASE_URL}${SEED_PATH}`, console);
+        if (!recovered) await maybeLogin(page, console);
         await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
       }
       if (/\/(login|signin|sign-in)\b/i.test(page.url())) {
@@ -748,12 +791,14 @@ if (CRAWL_DISABLED) {
       }
     },
 
-    // Mid-DFS re-auth: when a click slips past the destructive filter
-    // and lands on /logout, the next page.goto comes back as /login.
-    // Workers call reAuth() to recover their own context without
-    // affecting siblings.
-    reAuth: async (page) => {
-      await maybeLogin(page, console);
+    // Mid-DFS re-auth: a HARD navigation to a guarded route can bounce to
+    // /login while the app's silent token-refresh is still in flight (SSO
+    // refresh-cookie race), or a click slipped past the destructive filter
+    // and hit /logout. Recover THIS worker's context (re-navigate the
+    // intended route once the token settles) without affecting siblings.
+    reAuth: async (page, intendedUrl) => {
+      const recovered = authState ? await recoverSession(page, intendedUrl, console) : false;
+      if (!recovered) await maybeLogin(page, console);
     },
 
     // Hook into the existing per-page snapshot writer (forms, links,

@@ -23,6 +23,15 @@ Read the single JSON object from stdout **silently — do not print it**. Show t
 user a short summary from `stages[]` + `counts`. Note every entry in `delegations[]`.
 (For a fast demo against an already-crawled app, add `--reuse` to skip the crawl.)
 
+**If the envelope has a non-null `authRequired` block**, the crawl hit a login wall
+it can't pass (SSO / no saved session), so `counts` will be near-empty. STOP the loop
+and tell the user to authenticate once — this is human-in-the-loop (a real browser
+opens; they complete Google/Microsoft + MFA). Show them `authRequired.loginCommand`
+verbatim (or `BASE_URL=<url> npm run login`); it saves `output/crawler/auth-state.json`,
+which the crawler reuses (and preserves across wipes). After they've logged in, re-run
+Step 1 — the crawl will start authenticated. Do not proceed to classify/generate on a
+walled scan.
+
 ### Step 2 — Classify click-intents yourself (the `crawler-intent` delegation)
 The delegation gives you `input_paths[]` (per-page files of un-annotated clickables)
 and `schema_path` (the exact target schema). For EACH clickable in EACH page file:

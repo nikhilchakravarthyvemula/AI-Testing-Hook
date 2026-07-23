@@ -54,23 +54,20 @@ function tableReady() {
 // exiting prematurely while a sibling is about to enqueue children.
 const IDLE_GRACE_MS = 750;
 
-// Default per-list cap. When a page exposes a table / list of N similar
-// rows (each row navigates to /resource/detail?id=…), clicking every row
-// is wasteful — 5 samples are enough to characterize the route shape.
-// Tables are detected by URL pathname: items sharing the same pathname
-// (regardless of query) form a group. Set MAX_LIST_ITEMS_PER_NAV=Infinity
-// to opt out.
-// Default: pick at most 3 sibling clickables per "list group". Applies to
-// both `nav` candidates (grouped by URL pathname) and `click` candidates
-// (grouped by structural CSS-path signature). So a 100-row inventory
-// table fires 3 sample clicks, not 100 — and the sidebar (each link a
-// different pathname) is unaffected because the pathname-based group is
-// 1 item each.
+// Per-list drill-down depth. When a page exposes a table / list of N similar
+// rows (each row navigates to /resource/detail?id=…), the walker clicks into
+// each row to reach its detail page. Scanning IS deep scanning — the default
+// is UNBOUNDED (every row → every detail page). Tables are detected by URL
+// pathname: items sharing the same pathname (regardless of query) form a
+// group. Set MAX_LIST_ITEMS_PER_NAV=N to cap sampling to N rows per list group
+// (useful for very large tables where budget/maxPages would otherwise bound
+// the crawl); the sidebar is unaffected (each nav link is its own group).
 const DEFAULT_MAX_LIST_ITEMS = (() => {
   const v = process.env.MAX_LIST_ITEMS_PER_NAV;
-  if (v == null || v === '' || v === 'infinity' || v === 'Infinity') return 3;
+  if (v == null || v === '') return Infinity;           // deep by default
+  if (v === 'infinity' || v === 'Infinity') return Infinity;
   const n = Number(v);
-  return Number.isFinite(n) && n > 0 ? n : 3;
+  return Number.isFinite(n) && n > 0 ? n : Infinity;
 })();
 
 export async function runWorker(opts) {
@@ -180,8 +177,20 @@ export async function runWorker(opts) {
       if (/\/(login|signin|sign-in|sso|auth)\b/i.test(page.url()) && reAuth) {
         log(`[w${workerId}] /login redirect — re-authenticating`);
         state.recordIssue({ type: 're-auth', workerId, url, message: `landed at ${page.url()}` });
-        await reAuth(page).catch(e => { log(`[w${workerId}] re-auth failed: ${e.message}`); state.recordIssue({ type: 're-auth-failed', workerId, url, message: e.message }); });
+        // Pass the intended route so reAuth can re-navigate to IT (not the
+        // login page) once the SSO refresh-cookie token settles.
+        await reAuth(page, url).catch(e => { log(`[w${workerId}] re-auth failed: ${e.message}`); state.recordIssue({ type: 're-auth-failed', workerId, url, message: e.message }); });
         await page.waitForLoadState('load', { timeout: 4_000 }).catch(() => {});
+        // If recovery landed us back on the real route, let its content +
+        // table rows settle before scanning (recovery did a fresh goto).
+        if (!/\/(login|signin|sign-in|sso|auth)\b/i.test(page.url())) {
+          await page.waitForFunction(
+            () => !!(document.body && document.body.innerText && document.body.innerText.length > 200),
+            { timeout: 6_000 },
+          ).catch(() => {});
+          await page.waitForFunction(tableReady, { timeout: tableWaitMs, polling: 250 }).catch(() => {});
+          await page.waitForTimeout(postNavWaitMs);
+        }
       }
 
       // ── scan ──────────────────────────────────────────────────────────

@@ -142,6 +142,42 @@ function writeIntentDelegation(runId) {
   };
 }
 
+// ── login-wall detection ─────────────────────────────────────────────────
+// A fresh crawl that lands on a login page it can't get through (SSO / no
+// saved session) yields ~1 page and no app surface. Detect that so the host
+// can tell the user to run login-once first, instead of silently returning a
+// near-empty scan. login-once.mjs opens a real browser, you complete the
+// Google/Microsoft (+ MFA) sign-in, and it saves output/crawler/auth-state.json
+// — which crawl.mjs then reuses (and preserves across output/ wipes).
+const LOGIN_URL_RE = /(login|sign[-_ ]?in|signin|\/auth|realms?|oauth|sso|saml|identifier|consent|challenge)/i;
+const SSO_BTN_RE = /\b(sign in with|continue with|log ?in with|sso)\b/i;
+
+function detectLoginWall(crawler, url) {
+  if (!url) return null;                                   // codebase-only scan
+  if (fs.existsSync(path.join(OUT, 'crawler', 'auth-state.json'))) return null; // already have a session
+  const pages = crawler?.facts?.pages ?? [];
+  if (pages.length === 0 || pages.length > 2) return null; // a real crawl fanned out — not walled
+
+  const pageUrls = pages.map((p) => p.finalUrl || p.requestedUrl || '');
+  const loginPages = pageUrls.filter((u) => LOGIN_URL_RE.test(u));
+  const ssoButtons = [];
+  for (const p of pages)
+    for (const b of (p.clickables?.buttons ?? []))
+      if (SSO_BTN_RE.test(b.text || '')) ssoButtons.push(b.text.trim());
+  if (loginPages.length === 0 && ssoButtons.length === 0) return null;
+
+  return {
+    blocked: true,
+    reason: ssoButtons.length
+      ? `crawl stopped at a login wall — only SSO buttons found (${[...new Set(ssoButtons)].join(', ')}); the crawler can't complete an off-site OAuth flow`
+      : `crawl stopped at a login page (${loginPages[0]}) — no saved session and no password form to fill`,
+    ssoProviders: [...new Set(ssoButtons)],
+    fix: 'run login-once (opens a real browser; you complete the sign-in + MFA), then re-run this scan',
+    loginCommand: `BASE_URL=${url} SEED_PATH=/ node context-layer/content-extractor/crawler/login-once.mjs`,
+    savesTo: 'output/crawler/auth-state.json',
+  };
+}
+
 // ── commands ──────────────────────────────────────────────────────────────
 
 async function cmdScan(opts) {
@@ -178,6 +214,11 @@ async function cmdScan(opts) {
     clickEdges: topics['click-graph']?.count ?? 0,
     intentsAnnotated: crawler?.stats?.intentsAnnotated ?? 0,
   };
+  const authRequired = detectLoginWall(crawler, opts.url);
+  if (authRequired) {
+    log(`[ctx] ⚠ login wall: ${authRequired.reason}`);
+    log(`[ctx]   fix: ${authRequired.loginCommand}`);
+  }
   const stagesOk = stages.every((s) => s.ok);
   const summary = {
     run_id: runId,
@@ -187,6 +228,7 @@ async function cmdScan(opts) {
     target: { baseUrl: opts.url ?? crawler?.target?.baseUrl ?? null, codebase: opts.codebase ?? null },
     stages,
     counts,
+    authRequired: authRequired || null,
     delegations: delegation ? [delegation] : [],
     consumable: { index: 'output/indexed_output/index.json', topics_dir: 'output/indexed_output/' },
     log: LOG_FILE ? path.relative(REPO_ROOT, LOG_FILE) : null,
