@@ -1,13 +1,37 @@
-# testo — shared runtimes
+# @superalign/testo — the device-local testing engine (Service 1)
 
-Two packages survive here after the BYO-LLM migration (spec-13). The
-interactive REPL and the agentic harness were retired — the host model
-(VS Code Copilot via `mcp-server/`, Claude Code via `/ctx`) is the agent now.
+The deterministic engine that turns a live web app into structured test context.
+Packaged as an **npm package** (`@superalign/testo`), it runs on the developer's
+device (Win/Mac/Linux) because the crawl needs *their* browser + SSO session.
+No LLM here — the host editor's model (via the `BYOLLM` skill) does the
+click-intent reasoning; the Python generate/execute lives in the `web-app` service.
 
-| Package | Role |
-|---|---|
-| `skill-register/` | Deterministic skill runtime. `bin/call_skill.py <skill> --mode direct --json` runs a registered skill (e.g. `api-test-generator`) and emits a machine-readable `[call_skill:result] {…}` marker line that the MCP server and `ctx.mjs` parse. |
-| `model-api-connector/` | The single LLM seam: `getClient('host')`. The `host` provider POSTs chat requests to the MCP server's sampling bridge → `create_message` → the host model. No API keys. |
-| `_lib/load-env.mjs` | Tiny `.env` loader used by the generators and `bin/chat.mjs`. |
+## Use
 
-Architecture: see `mcp-server/docs/ARCHITECTURE.md`.
+```bash
+testo scan  --url <URL> [--codebase <PATH>] [--reuse]   # crawl + index
+testo crawl --url <URL>                                  # crawl only
+testo index                                              # index existing output/
+```
+
+## Layout
+
+```
+testo/
+├── bin/testo.mjs        the CLI (slim orchestrator: crawl → index)
+├── src/
+│   ├── crawler/         Playwright crawl — walker, wire-guard, login-once, deterministic advisor
+│   └── indexer/         merge source bundles under output/ → topics
+└── package.json         bin + files (src, bin)
+```
+
+Output lands in the consuming project's `output/` (the only writable surface).
+
+## Migration status (spec-16)
+
+- ✅ P1 — `crawler` + `indexer` moved here; `bin/testo.mjs` + `package.json` added.
+- ⏳ Still parked here pending **P2** (move to `web-app`): `skill-register/`, `_lib/`
+  — these are the Python skill runtime and shared lib, which belong to the
+  containerized service, not the device engine.
+
+See `docs/spec-16-three-service-rollout.md`.

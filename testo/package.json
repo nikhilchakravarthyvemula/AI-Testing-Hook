@@ -1,0 +1,20 @@
+{
+  "name": "@superalign/testo",
+  "version": "0.1.0",
+  "description": "Deterministic web-app testing engine — crawl a live app into structured test context (BYO-LLM: the host editor's model does the reasoning). Device-local; runs the Playwright crawl + indexer.",
+  "type": "module",
+  "bin": {
+    "testo": "bin/testo.mjs"
+  },
+  "files": [
+    "bin",
+    "src"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "crawl": "node src/crawler/extract.mjs",
+    "index": "node src/indexer/index.mjs"
+  }
+}

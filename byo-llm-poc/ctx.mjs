@@ -22,7 +22,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');      // byo-llm-poc/ sits at repo root
 const OUT = path.join(REPO_ROOT, 'output');
 const RUN_ENTRY = path.join(REPO_ROOT, 'context-layer', 'content-extractor', 'run.mjs');
-const INDEX_ENTRY = path.join(REPO_ROOT, 'context-layer', 'indexer', 'index.mjs');
+const INDEX_ENTRY = path.join(REPO_ROOT, 'testo', 'src', 'indexer', 'index.mjs');   // spec-16: indexer moved to testo
 
 // ── stdout is JSON-only; everything else goes to stderr + a run log ──────────
 let LOG_FILE = null;
@@ -184,7 +184,7 @@ function detectLoginWall(crawler, url) {
       : `crawl stopped at a login page (${loginPages[0]}) — no saved session and no password form to fill`,
     ssoProviders: [...new Set(ssoButtons)],
     fix: 'run login-once (opens a real browser; you complete the sign-in + MFA), then re-run this scan',
-    loginCommand: `BASE_URL=${url} SEED_PATH=/ node context-layer/content-extractor/crawler/login-once.mjs`,
+    loginCommand: `BASE_URL=${url} SEED_PATH=/ node testo/src/crawler/login-once.mjs`,
     savesTo: 'output/crawler/auth-state.json',
   };
 }

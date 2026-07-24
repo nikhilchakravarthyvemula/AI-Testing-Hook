@@ -38,7 +38,7 @@ import { build as buildOpenApi }      from './topics/openapi.mjs';
 
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.resolve(__dirname, '..', '..');
+const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');   // testo/src/indexer → repo root
 const OUT_DIR = path.join(REPO_ROOT, 'output', 'indexed_output');
 
 

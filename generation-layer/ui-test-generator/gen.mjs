@@ -83,7 +83,7 @@ const outDir = path.resolve(REPO_ROOT, opts.outputDir || 'output/generation/ui-t
 fs.mkdirSync(outDir, { recursive: true });
 
 // storageState (the repo's SSO pattern): reuse a session saved by
-// `npm run login` (context-layer/content-extractor/crawler/login-once.mjs → output/crawler/auth-state.json).
+// `npm run login` (testo/src/crawler/login-once.mjs → output/crawler/auth-state.json).
 // This is how we authenticate against Google-SSO targets like superalign, which
 // can't be driven through a headless username/password form.
 const loginUrlRegex = scenario.auth?.loginUrlRegex || '/(login|sign-?in|auth|realms)';
@@ -98,7 +98,7 @@ let authType = opts.storageState ? 'storageState' : (scenario.auth?.type || 'aut
 if (authType === 'auto') authType = hasState ? 'storageState' : 'login-form';
 if (authType === 'storageState' && !hasState) {
   console.warn(`  ⚠ auth: storageState requested but no saved session at ${stateRel} (${fs.existsSync(statePath) ? '0 cookies' : 'missing'}).`);
-  console.warn(`    One-time interactive login required for SSO targets:  (cd context-layer/content-extractor/crawler && npm run login)`);
+  console.warn(`    One-time interactive login required for SSO targets:  (cd testo/src/crawler && npm run login)`);
   console.warn('    Proceeding WITHOUT auth — auth-gated steps will fail.');
   authType = 'none';
 }

@@ -5,7 +5,7 @@
   "private": true,
   "description": "Architecture-shaped testing harness. See README.md for folder → diagram mapping.",
   "scripts": {
-    "login": "SEED_PATH=/ node context-layer/content-extractor/crawler/login-once.mjs",
+    "login": "SEED_PATH=/ node testo/src/crawler/login-once.mjs",
     "test:ui": "node generation-layer/ui-test-generator/gen.mjs scenario.json",
     "test:perf": "node generation-layer/perf-test-generator/gen.mjs scenario.json",
     "report:build": "node generation-layer/allure-reporter/build.mjs",
@@ -17,10 +17,10 @@
     "extract:live": "ONLY=crawler npm run --silent extract",
     "extract:code": "SKIP=crawler npm run --silent extract",
     "extract:fastapi": "ONLY=python-fastapi npm run --silent extract",
-    "crawler": "cd context-layer/content-extractor/crawler && npm run all",
+    "crawler": "cd testo/src/crawler && npm run all",
     "code-ast": "context-layer/content-extractor/_lib/.venv/bin/python context-layer/content-extractor/code-extractors/python-ast/extract.py"
   },
   "workspaces": [
-    "context-layer/content-extractor/crawler"
+    "testo/src/crawler"
   ]
 }

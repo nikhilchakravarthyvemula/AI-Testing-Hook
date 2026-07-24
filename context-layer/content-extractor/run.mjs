@@ -129,6 +129,14 @@ function readRecommendedExtractors() {
 
 
 const SOURCES = discoverSources();
+// spec-16: the crawler moved to the `testo` package (testo/src/crawler), so
+// auto-discovery under content-extractor/ no longer finds it. Register it
+// explicitly at its new location until the orchestration is fully split
+// (testo crawls on the device, this orchestrator runs the extractors).
+const TESTO_CRAWLER = path.resolve(__dirname, '..', '..', 'testo', 'src', 'crawler', 'extract.mjs');
+if (!SOURCES.some(s => s.id === 'crawler') && fs.existsSync(TESTO_CRAWLER)) {
+  SOURCES.push({ id: 'crawler', kind: 'primary', entrypoint: TESTO_CRAWLER, runtime: 'node' });
+}
 if (SOURCES.length === 0) {
   console.warn('[content-extractor] no extractors discovered under', __dirname);
   process.exit(0);

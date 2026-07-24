@@ -39,7 +39,7 @@ const STAGES = [
   },
   {
     id: 'indexer',
-    entrypoint: path.join(__dirname, 'indexer', 'index.mjs'),
+    entrypoint: path.join(__dirname, '..', 'testo', 'src', 'indexer', 'index.mjs'),   // spec-16: indexer moved to testo
     description: 'Synthesise per-topic indices (apis, routes, pages, models, …) from all sources',
   },
   {
