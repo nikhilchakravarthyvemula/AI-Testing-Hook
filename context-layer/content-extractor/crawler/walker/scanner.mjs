@@ -151,14 +151,15 @@ export function stateChanged(a, b) {
  * @returns {Promise<Object>}           {totalElements, items[], rejected}
  */
 export async function scanInteractables(page, opts) {
-  const { safeRe, destrRe, sameOrigin = null, cursorWalkMax = 5000 } = opts || {};
+  const { safeRe, destrRe, neverRe, sameOrigin = null, cursorWalkMax = 5000 } = opts || {};
 
-  return page.evaluate(({ safeRe, destrRe, sameOrigin, cursorWalkMax }) => {
+  return page.evaluate(({ safeRe, destrRe, neverRe, sameOrigin, cursorWalkMax }) => {
 
     // ───── helpers (browser-side) ───────────────────────────────────────
 
     const safe  = safeRe  ? new RegExp(safeRe,  'i') : null;
     const destr = destrRe ? new RegExp(destrRe, 'i') : null;
+    const never = neverRe ? new RegExp(neverRe, 'i') : null;
 
     // CSS path that uniquely locates an element by tag + nth-of-type chain.
     // Stops at the closest ancestor with an id (which Playwright resolves
@@ -319,7 +320,8 @@ export async function scanInteractables(page, opts) {
     // ───── classify + filter ────────────────────────────────────────────
 
     const items = [];
-    const rejected = { destructive: 0, notSafe: 0, inForm: 0, disabled: 0, invisible: 0 };
+    const rejected = { never: 0, notSafe: 0, inForm: 0, disabled: 0, invisible: 0 };
+    let destructiveFlagged = 0;   // destructive controls we WILL click (wire-guard protects)
     let domIndex = 0;
 
     for (const el of semanticSet) {
@@ -378,6 +380,7 @@ export async function scanInteractables(page, opts) {
         cursorPointer,
         selector,
         listGroupKey,
+        destructive: false,   // spec-15: flagged by the destructive-hint regex; still clicked
         rejected: null,
       };
 
@@ -388,7 +391,23 @@ export async function scanInteractables(page, opts) {
       // `drop-shadow-sm`, `dropdown-trigger`, `disabled:opacity-50` would
       // otherwise trip the destructive regex on ordinary navigation links.
       if (kind === 'nav' || kind === 'click') {
-        if (destr && lab.userSignal && destr.test(lab.userSignal)) { rejected.destructive++; base.rejected = 'destructive'; items.push(base); continue; }
+        // spec-15 D2. NEVER set — skip regardless of the destructive hint. These
+        // break the client session or redirect away (logout, account/org deletes),
+        // so the wire-guard can't neutralize them. Checked FIRST + independently,
+        // since a session-breaker ("Close organization") needn't match the
+        // destructive-hint regex.
+        if (never && lab.userSignal && never.test(lab.userSignal)) {
+          rejected.never++; base.rejected = 'never-click';
+          if (destr && destr.test(lab.userSignal)) base.destructive = true;
+          items.push(base); continue;
+        }
+        // Destructive HINT — flag but still CLICK. The wire-level mutation guard
+        // aborts any resulting PUT/PATCH/DELETE before it leaves the browser, and
+        // we capture the blocked request as a test candidate.
+        if (destr && lab.userSignal && destr.test(lab.userSignal)) {
+          base.destructive = true;
+          destructiveFlagged++;
+        }
         // SAFE regex applied only when we have a label to test; pure icon
         // buttons with no signal fall through (we click them by index).
         if (safe && lab.label && !safe.test(lab.label) && !safe.test(lab.userSignal)) {
@@ -408,10 +427,11 @@ export async function scanInteractables(page, opts) {
       totalElements: items.length,
       items,
       rejected,
+      destructiveFlagged,
       cursorTruncated,
     };
-  }, { safeRe, destrRe, sameOrigin, cursorWalkMax }).catch(() => ({
-    totalElements: 0, items: [], rejected: {}, cursorTruncated: false,
+  }, { safeRe, destrRe, neverRe, sameOrigin, cursorWalkMax }).catch(() => ({
+    totalElements: 0, items: [], rejected: {}, destructiveFlagged: 0, cursorTruncated: false,
   }));
 }
 

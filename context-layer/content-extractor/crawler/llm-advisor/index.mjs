@@ -5,16 +5,19 @@
 // to `null` on any failure (timeout, missing key, invalid JSON, etc.)
 // so the crawler can keep its deterministic path when the LLM is sick.
 //
-// The advisor itself is stateless — it owns the LLM client (the "host"
-// provider: the MCP host model via the sampling bridge) and a small
-// JSON-validation step per decision kind. Prompt files live in sibling
-// modules (auth-detector.mjs, intent-extract.mjs, …).
+// spec-15 (Copilot-deferred): the crawler has NO live LLM. There is no
+// transport — MCP sampling is org-blocked, no local model, no key. So every
+// advisor call returns null and each decision point uses its deterministic
+// rule-based path; ALL LLM classification (intent + destructiveness) is done
+// by the HOST after the crawl, over the recorded clickables (see
+// byo-llm-poc/ctx.mjs delegation). The per-kind prompt/schema modules are
+// retained because their SCHEMA/CATEGORIES define the contract the host
+// classifies against.
 
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { getClient } from '../../../../testo/model-api-connector/index.mjs';
 import { parseLooseJson } from './strip-think.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -44,39 +47,18 @@ function ensureEnvLoaded() {
 }
 
 
-// ── client cache ───────────────────────────────────────────────────────────
+// ── client (removed) ─────────────────────────────────────────────────────
 //
-// Build a single client per process and reuse it. fetch() in Node 18+
-// already pools sockets, so this is mostly about avoiding the missing-
-// bridge check on every call.
-
-let _client = null;
-// LLM_PROVIDER selects the backend. 'host' (the only registered provider —
-// BYO-LLM, routes to the MCP host model via the sampling bridge) is the
-// default. With no bridge env present the client construction fails and the
-// advisor returns null → the crawler keeps its deterministic path.
-function getLlmClient() {
-  ensureEnvLoaded();
-  if (_client) return _client;
-  const provider = process.env.LLM_PROVIDER || 'host';
-  try {
-    _client = getClient(provider);
-    return _client;
-  } catch (e) {
-    console.warn(`[llm-advisor] ${provider} client unavailable: ${e.message}`);
-    return null;
-  }
-}
+// There is no live LLM client in the crawler anymore (spec-15). Kept as a
+// null-returning stub so any test import still resolves.
+function getLlmClient() { return null; }
 
 
-// ── feature toggle ─────────────────────────────────────────────────────────
+// ── feature toggle (removed) ─────────────────────────────────────────────
 //
-// `CRAWLER_LLM=0` disables every advisor call. Used for regression runs
-// where deterministic output matters more than smarter behaviour.
-
-function llmEnabled() {
-  return (process.env.CRAWLER_LLM ?? '1') !== '0';
-}
+// The CRAWLER_LLM flag is gone: the crawler is always deterministic (no live
+// LLM). Kept as a false-returning stub for test-import compatibility.
+function llmEnabled() { return false; }
 
 
 // ── adviser dispatch ───────────────────────────────────────────────────────

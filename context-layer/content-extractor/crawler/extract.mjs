@@ -98,6 +98,13 @@ async function main() {
 
 async function annotateClickableIntents(pages) {
   if (!pages.length) return;
+  // spec-15: the crawler has no live LLM. Intent + destructiveness are
+  // classified by the HOST after the crawl (byo-llm-poc/ctx.mjs delegation),
+  // so this in-crawl pass is a no-op — clickables are emitted raw. adviseOn()
+  // returns null regardless; short-circuit to avoid iterating pages for nothing.
+  console.log('[crawler] intent-extract: deferred to host (crawler emits raw clickables)');
+  return;
+  /* eslint-disable no-unreachable */
   let annotatedPages = 0;
   let annotatedIntents = 0;
   let failedBatches = 0;

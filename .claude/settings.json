@@ -1,0 +1,17 @@
+{
+  "//": "Project-shared guardrails. Deny > allow, so these hold regardless of settings.local.json's allow-list. They protect the read-only guard itself and close the obvious bash bypasses. Code read-only during a skill run is enforced by scripts/skill-guard.sh + the crawler wire-guard.",
+  "permissions": {
+    "deny": [
+      "Edit(.claude/settings.json)",
+      "Write(.claude/settings.json)",
+      "Edit(.claude/settings.local.json)",
+      "Write(.claude/settings.local.json)",
+      "Edit(scripts/skill-guard.sh)",
+      "Write(scripts/skill-guard.sh)",
+      "Edit(.claude/skills/**)",
+      "Write(.claude/skills/**)",
+      "Bash(sudo:*)",
+      "Bash(chmod:*)"
+    ]
+  }
+}

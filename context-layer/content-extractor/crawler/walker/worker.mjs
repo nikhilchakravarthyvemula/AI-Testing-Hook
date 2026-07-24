@@ -78,6 +78,7 @@ export async function runWorker(opts) {
     sameOrigin,
     safeRe,
     destrRe,
+    neverRe,
     maxClicksPerPage = Infinity,
     maxListItemsPerNav = DEFAULT_MAX_LIST_ITEMS,
     postNavWaitMs = 1500,
@@ -197,7 +198,7 @@ export async function runWorker(opts) {
       // scannerFn defaults to the heuristic scanInteractables. The LLM-
       // primary walker overrides it with a scanner that asks an LLM what
       // to click and then verifies the suggestions against the DOM.
-      const scan = await scannerFn(page, { safeRe, destrRe, sameOrigin, log });
+      const scan = await scannerFn(page, { safeRe, destrRe, neverRe, sameOrigin, log });
 
       const metaItems = selectInteractables(scan.items).map(it => ({
         kind: it.kind, tag: it.tag, role: it.role,
@@ -310,7 +311,8 @@ export async function runWorker(opts) {
         const rejStr = Object.entries(r).filter(([,v]) => v > 0).map(([k,v]) => `${k}=${v}`).join(', ');
         const capStr = listCapDropped > 0 ? `, list-cap-dropped=${listCapDropped}` : '';
         const scStr  = navShortcircuited > 0 ? `, nav-shortcircuit=${navShortcircuited}` : '';
-        log(`[w${workerId}]   elements=${scan.totalElements} [${kindStr}]  candidates=${candidates.length} (page-dedup=${pageDedup}, path-skip=${pathSkipped}${capStr}${scStr}, rejected: ${rejStr || 'none'})  clicking=${clicks.length}${metaItems.length ? `  edit/toggle/expand=${metaItems.length}` : ''}`);
+        const destrStr = scan.destructiveFlagged > 0 ? `  destructive-clicking=${scan.destructiveFlagged} (wire-guarded)` : '';
+        log(`[w${workerId}]   elements=${scan.totalElements} [${kindStr}]  candidates=${candidates.length} (page-dedup=${pageDedup}, path-skip=${pathSkipped}${capStr}${scStr}, rejected: ${rejStr || 'none'})  clicking=${clicks.length}${destrStr}${metaItems.length ? `  edit/toggle/expand=${metaItems.length}` : ''}`);
       }
 
       // ── click loop ────────────────────────────────────────────────────

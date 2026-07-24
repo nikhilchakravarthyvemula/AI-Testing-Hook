@@ -22,6 +22,7 @@
 // graph synthesis, and per-context auth refresh.
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
@@ -97,6 +98,46 @@ const DESTRUCTIVE_CLICK_REGEX = new RegExp(
     '\\b(?:delete|cancel|remove|revoke|disable|sign[- ]?out|log[- ]?out|destroy|reset|drop|trash|archive|deactivate|terminate|kill|stop|pause|suspend|ban|clear|wipe|purge|leave|exit|close[ -](?:account|session)|unlink|disconnect)\\b',
   'i'
 );
+// spec-15 D2: destructive controls are now CLICKED — the wire-level mutation
+// guard aborts any resulting PUT/PATCH/DELETE before it reaches the server, so
+// clicking a Delete/Deactivate is safe (we capture the blocked request as a
+// test candidate). DESTRUCTIVE_CLICK_REGEX above is now just a HINT/flag.
+// The NEVER-CLICK set is the small class we STILL skip, because they destroy
+// the client session or redirect away — no network request to block:
+// logout/sign-out, and account/org-level deletes/closes.
+const NEVER_CLICK_REGEX = new RegExp(
+  process.env.NEVER_CLICK_REGEX ||
+    '\\b(?:log[\\s-]?out|logout|sign[\\s-]?out|signout|end[\\s-]?session|switch[\\s-]?account)\\b' +
+    '|\\b(?:delete|remove|close|deactivate|terminate|deprovision)\\b[\\s\\S]{0,20}\\b(?:account|organization|org|workspace|tenant|profile|everything)\\b',
+  'i'
+);
+// ── mutation guard (spec-15) — block WRITE requests at the wire ────────────
+// The HTTP method is a deterministic destructiveness signal the button label
+// isn't. We let reads through (the crawl needs them to load data) and ABORT
+// writes before they leave the browser — so the crawler can click EVERY
+// control (even a Confirm-Delete) for full feature coverage while the mutation
+// never reaches the server. Each blocked write is captured as a test candidate.
+//   INTERCEPT_MODE=abort|mock|off        abort (default) = honest network error
+//   INTERCEPT_BLOCK_POST=writes|all|none writes (default) = block POST unless read-shaped
+const INTERCEPT_MODE = (process.env.INTERCEPT_MODE || 'abort').toLowerCase();
+const INTERCEPT_BLOCK_POST = (process.env.INTERCEPT_BLOCK_POST || 'writes').toLowerCase();
+// Auth/session infra is NEVER blocked — aborting the token refresh would kill
+// the session and bounce every route back to /login.
+const AUTH_ALLOW_RE = /\/(oidc|auth|authorize|token|session|refresh|login|logout|sso|callback|userinfo|\.well-known)\b|accounts\.google\.com|login\.microsoftonline\.com|login\.live\.com|okta\.com|auth0\.com|aadcdn\.msftauth\.net/i;
+// Read-shaped POSTs (search/query/graphql/…) are reads, not creates — allow.
+const READ_POST_RE = /\/(search|query|list|filter|graphql|batch|export|report|count|lookup|resolve|validate|preview|autocomplete|suggest)\b/i;
+
+function isWriteRequest(method, url) {
+  const m = (method || 'GET').toUpperCase();
+  if (m === 'GET' || m === 'HEAD' || m === 'OPTIONS' || m === 'TRACE') return false;
+  if (m === 'POST') {
+    if (INTERCEPT_BLOCK_POST === 'none') return false;
+    if (INTERCEPT_BLOCK_POST === 'all')  return true;
+    return !READ_POST_RE.test(url);   // 'writes': block POST unless read-shaped
+  }
+  return true;   // PUT / PATCH / DELETE / unknown verb → treat as a write
+}
+
 // Per-page click cap. Default `Infinity` = exhaustive (the user's stated
 // agenda: click EVERY non-destructive clickable on every page). Set to a
 // finite integer to keep runs bounded on data-table-heavy pages.
@@ -158,10 +199,24 @@ if (preservedAuthState) {
   fs.writeFileSync(AUTH_STATE, preservedAuthState);
 }
 
-// Parse the auth state (if any) for cookie/localStorage injection.
-const authState = fs.existsSync(AUTH_STATE)
+// Parse the auth state (if any) for cookie/localStorage injection. MUTABLE —
+// after the auth warm-up establishes a session, we replace this with the
+// fresh (rotated) storageState so the fan-out workers inject the LIVE token,
+// not the stale one, and we persist it back to disk for the next run.
+let authState = fs.existsSync(AUTH_STATE)
   ? JSON.parse(fs.readFileSync(AUTH_STATE, 'utf8'))
   : null;
+
+// Serialize session recovery: with a single-use rotating refresh token, two
+// contexts refreshing at once invalidate each other. This chain ensures only
+// ONE recoverSession() runs at a time — each rotation completes before the
+// next begins.
+let _recoveryChain = Promise.resolve();
+function serializedRecover(fn) {
+  const run = _recoveryChain.then(fn, fn);
+  _recoveryChain = run.catch(() => {});   // never let a rejection break the chain
+  return run;
+}
 
 const streams = {
   req: fs.createWriteStream(path.join(RAW_DIR, 'requests.ndjson')),
@@ -170,6 +225,10 @@ const streams = {
   console: fs.createWriteStream(path.join(RAW_DIR, 'console.ndjson')),
   failed: fs.createWriteStream(path.join(RAW_DIR, 'failed.ndjson')),
   ws: fs.createWriteStream(path.join(RAW_DIR, 'websockets.ndjson')),
+  // spec-15: write requests the mutation-guard blocked at the wire. Each is a
+  // test candidate (method + path + body + auth header) for the host to
+  // classify and the generator to turn into a curl.
+  blocked: fs.createWriteStream(path.join(RAW_DIR, 'blocked-mutations.ndjson')),
 };
 function writeNd(stream, obj) { stream.write(JSON.stringify(obj) + '\n'); }
 
@@ -286,18 +345,64 @@ function attachListeners(page, pageUrlHint) {
     return (live && live !== 'about:blank') ? live : pageUrlHint;
   };
 
+  // ── mutation guard: intercept BEFORE the request leaves the browser ──────
+  // Reads (and all auth/session infra) continue untouched; writes are aborted
+  // and captured. This is the deterministic safety net for every click — even
+  // the icon-only delete the label-regex misses, and even the final Confirm.
+  if (INTERCEPT_MODE !== 'off') {
+    page.route('**/*', async (route) => {
+      let req, method, url;
+      try { req = route.request(); method = req.method(); url = req.url(); }
+      catch { return route.continue().catch(() => {}); }
+      if (AUTH_ALLOW_RE.test(url) || !isWriteRequest(method, url)) {
+        return route.continue().catch(() => {});
+      }
+      try {
+        writeNd(streams.blocked, {
+          ts: Date.now(),
+          pageUrl: currentPageUrl(),
+          method, url,
+          resourceType: req.resourceType(),
+          headers: req.headers(),                       // carries Authorization: Bearer …
+          postData: req.postData()?.slice(0, 20_000) ?? null,
+          action: INTERCEPT_MODE,
+        });
+      } catch {}
+      if (INTERCEPT_MODE === 'mock') {
+        return route.fulfill({
+          status: 200, contentType: 'application/json',
+          body: '{"ok":true,"_interceptedByCrawler":true}',
+        }).catch(() => {});
+      }
+      return route.abort('blockedbyclient').catch(() => {});
+    }).catch(() => {});
+  }
+
   page.on('request', request => {
     if (SKIP_RESOURCE_TYPES.has(request.resourceType())) return;
     const redirectedFrom = request.redirectedFrom();
+    const _method = request.method();
+    const _url = request.url();
+    // Did the mutation-guard intercept this (abort/mock) → it never reached the
+    // real server? Same deterministic decision as the route handler above, so
+    // EVERY request is saved here (blocked or not) with the flag. The host/LLM
+    // decides what to do: a blocked DELETE is still a real, testable endpoint —
+    // we clicked the control, captured the request, just didn't let it fire.
+    const blocked = INTERCEPT_MODE !== 'off'
+      && !AUTH_ALLOW_RE.test(_url)
+      && isWriteRequest(_method, _url);
     writeNd(streams.req, {
       ts: Date.now(),
       pageUrl: currentPageUrl(),
-      url: request.url(),
-      method: request.method(),
+      url: _url,
+      method: _method,
       resourceType: request.resourceType(),
       headers: request.headers(),
       postData: request.postData()?.slice(0, 20_000) ?? null,
       redirectedFromUrl: redirectedFrom?.url() ?? null,
+      blocked,                                   // true = guard aborted/mocked it (no server hit)
+      reachedServer: !blocked,                   // convenience inverse for the host
+      interceptAction: blocked ? INTERCEPT_MODE : null,   // 'abort' | 'mock' | null
     });
   });
 
@@ -652,34 +757,81 @@ async function recordPage(page, requestedUrl, navStatus, phase = 'crawl', extra 
 // valid. We recover by letting the refresh settle and RE-navigating the
 // intended route (the refresh cookie is re-sent each time). This is why a
 // route reached by an in-app click worked but a direct goto bounced.
+const _IDP_RE = /accounts\.google\.com|login\.microsoftonline\.com|login\.live\.com|okta\.com|onelogin\.com|auth0\.com|aadcdn\.msftauth\.net/i;
+
 async function recoverSession(page, intendedUrl, log) {
   if (!authState) return false;                    // nothing saved → can't recover, fall back to form login
   const say = (m) => (log?.info ?? console.log).call(log || console, m);
   const target = intendedUrl || page.url();
+  // Recovered = we're on a REAL app page: not the login route, and not parked
+  // on an external IdP mid-handshake.
+  const looksRecovered = () => {
+    const u = page.url();
+    return !LOGIN_URL_REGEX.test(u) && !_IDP_RE.test(u);
+  };
+  // The app self-heals a stale access token via SILENT SSO: refresh 401 →
+  // /oidc/login/<idp>?prompt=none → IdP round-trip (saved cookies, no UI) →
+  // /oidc/callback → refresh 200. That chain takes 10-20s and MUST NOT be
+  // interrupted — the old bug re-navigated after 8s and killed it mid-flight.
+  // So: navigate once, then POLL for it to land (no interrupting goto).
+  const settle = async (ms) => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (looksRecovered()) { await waitForUrlStable(page).catch(() => {}); if (looksRecovered()) return true; }
+      await page.waitForTimeout(500);
+    }
+    return looksRecovered();
+  };
   for (let attempt = 1; attempt <= 3; attempt++) {
     await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
-    // Win the race: wait for EITHER the auth/refresh XHR to return OR the
-    // URL to leave the login route, whichever happens first.
-    await Promise.race([
-      page.waitForResponse(
-        r => /oidc\/refresh|\/auth\b|\/token\b|\/session\b|\/refresh\b/i.test(r.url()) && r.status() < 400,
-        { timeout: 8_000 },
-      ).catch(() => {}),
-      page.waitForFunction(
-        () => !/\/(login|signin|sign-in|sso)\b/i.test(location.pathname),
-        { timeout: 8_000 },
-      ).catch(() => {}),
-    ]);
-    await waitForUrlStable(page).catch(() => {});
-    if (!LOGIN_URL_REGEX.test(page.url())) {
-      say(`[auth] session recovered (attempt ${attempt}) → ${page.url()}`);
+    if (await settle(22_000)) {              // generous — covers the IdP round-trip
+      say(`[auth] session recovered via silent SSO (attempt ${attempt}) → ${page.url()}`);
       return true;
     }
-    await page.waitForTimeout(1_000);
   }
-  say(`[auth] session recovery exhausted after 3 attempts — still at ${page.url()} ` +
-      `(auth-state.json may be expired; re-run \`npm run login\`)`);
+  say(`[auth] session recovery failed after 3 attempts — still at ${page.url()}`);
   return false;
+}
+
+// ── interactive manual-login fallback ────────────────────────────────────
+// When automatic recovery fails (dead session / silent SSO won't fire), open a
+// VISIBLE browser (login-once.mjs) and let the human sign in — SSO, MFA, the
+// works. login-once auto-detects the authenticated landing, saves the session
+// to auth-state.json, and exits; we reload it and resume the crawl. Runs at
+// most ONCE per crawl (promise-guarded) so we never pop 8 windows. Disable in
+// headless/CI with CRAWL_INTERACTIVE_LOGIN=0.
+const INTERACTIVE_LOGIN = (process.env.CRAWL_INTERACTIVE_LOGIN ?? '1') !== '0';
+let _interactiveLoginPromise = null;
+
+function _spawnLoginOnce() {
+  return new Promise((resolve) => {
+    const script = path.join(__dirname, 'login-once.mjs');
+    const child = spawn(process.execPath, [script], {
+      env: { ...process.env, BASE_URL, SEED_PATH },
+      stdio: 'inherit',   // the user sees login-once's prompts; a real window opens
+    });
+    child.on('exit', (code) => resolve(code ?? 1));
+    child.on('error', () => resolve(1));
+  });
+}
+
+async function ensureInteractiveLogin() {
+  if (!INTERACTIVE_LOGIN) return false;
+  if (_interactiveLoginPromise) return _interactiveLoginPromise;   // already running/done → all workers await it
+  _interactiveLoginPromise = (async () => {
+    console.log('\n[auth] ⚠ automatic sign-in failed — opening a browser window for MANUAL login.');
+    console.log('[auth]   Complete the SSO / MFA in the window; it saves and closes automatically once you reach the app.\n');
+    const code = await _spawnLoginOnce();
+    if (code === 0 && fs.existsSync(AUTH_STATE)) {
+      try { authState = JSON.parse(fs.readFileSync(AUTH_STATE, 'utf8')); }
+      catch { return false; }
+      console.log('[auth] ✓ manual login captured — resuming the crawl with the fresh session.\n');
+      return true;
+    }
+    console.warn(`[auth] manual login did not complete (login-once exit ${code}) — continuing unauthenticated.`);
+    return false;
+  })();
+  return _interactiveLoginPromise;
 }
 
 // Shared helper: inject saved auth-state.json cookies + localStorage into
@@ -742,7 +894,8 @@ if (CRAWL_DISABLED) {
   seedTasks.forEach(t => console.log(`        seed [${t.phase}]: ${t.url}`));
   if (authState) console.log(`[crawl] using saved auth-state.json (${authState.cookies?.length || 0} cookies)`);
   console.log(`[crawl]   safe:        /${SAFE_CLICK_REGEX.source}/i`);
-  console.log(`[crawl]   destructive: /${DESTRUCTIVE_CLICK_REGEX.source}/i`);
+  console.log(`[crawl]   destructive (flag, still clicked): /${DESTRUCTIVE_CLICK_REGEX.source}/i`);
+  console.log(`[crawl]   never-click (session-breakers, skipped): /${NEVER_CLICK_REGEX.source}/i`);
   console.log(`[crawl]   max-clicks-per-page=${SAFE_CLICK_MAX_PER_PAGE === Infinity ? 'unbounded' : SAFE_CLICK_MAX_PER_PAGE}  max-depth=${MAX_INTERACT_DEPTH}  max-pages=${MAX_INTERACT_PAGES}  budget=${Math.round(CRAWL_BUDGET_MS/1000)}s`);
 
   const serialized = await runWalkerPool({
@@ -751,6 +904,7 @@ if (CRAWL_DISABLED) {
     sameOrigin,
     safeRe:  SAFE_CLICK_REGEX.source,
     destrRe: DESTRUCTIVE_CLICK_REGEX.source,
+    neverRe: NEVER_CLICK_REGEX.source,
     maxClicksPerPage: SAFE_CLICK_MAX_PER_PAGE,
     maxDepth: MAX_INTERACT_DEPTH,
     maxPages: MAX_INTERACT_PAGES,
@@ -763,6 +917,19 @@ if (CRAWL_DISABLED) {
     // Optional: LLM-primary scanner. Default (undefined) → worker uses
     // the heuristic scanInteractables. crawler-llm extractor switches.
     scannerFn,
+
+    // Auth warm-up: when we have a saved session, bring up ONE context first
+    // (it completes the silent-SSO handshake serially), then fan out the rest
+    // seeded with the resulting session — avoids the parallel refresh race.
+    serializeAuth: !!authState,
+    onAuthWarmed: async (fresh) => {
+      if (!fresh) return;
+      authState = fresh;                                  // fan-out workers now inject the LIVE token
+      try {
+        fs.writeFileSync(AUTH_STATE, JSON.stringify(fresh));   // persist the rotated session for next run
+        console.log(`[auth] warm-up captured a fresh session → re-saved auth-state.json (${(fresh.cookies || []).length} cookies)`);
+      } catch (e) { console.warn(`[auth] could not re-save auth-state.json: ${e.message}`); }
+    },
 
     // ── per-context setup ──────────────────────────────────────────────
     // Each worker's context starts fresh. Inject the saved auth state,
@@ -778,11 +945,22 @@ if (CRAWL_DISABLED) {
       await waitForUrlStable(page);
       if (/\/(login|signin|sign-in|auth|sso)\b/i.test(page.url())) {
         console.log(`[interact] w${workerId} redirected to ${page.url()} — recovering session`);
-        // Saved SSO session → wait for the refresh-cookie token to settle and
-        // retry; only fall back to form-fill when there's no saved session.
-        const recovered = await recoverSession(page, `${BASE_URL}${SEED_PATH}`, console);
+        // Serialize recovery (single-use rotating token) → wait for the silent
+        // SSO to settle; only fall back to form-fill when there's no session.
+        const recovered = await serializedRecover(() => recoverSession(page, `${BASE_URL}${SEED_PATH}`, console));
         if (!recovered) await maybeLogin(page, console);
         await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+      }
+      // Automatic recovery failed → offer a MANUAL login (visible browser, once
+      // per crawl). On success, seed this context with the fresh session + reload.
+      if (/\/(login|signin|sign-in)\b/i.test(page.url())) {
+        const ok = await ensureInteractiveLogin();
+        if (ok) {
+          try { await page.context().addCookies(authState.cookies || []); } catch {}
+          await page.goto(`${BASE_URL}${SEED_PATH}`, { waitUntil: 'domcontentloaded' }).catch(() => {});
+          await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+          await waitForUrlStable(page).catch(() => {});
+        }
       }
       if (/\/(login|signin|sign-in)\b/i.test(page.url())) {
         console.warn(`[interact] w${workerId} still on login page (${page.url()}) — this worker will see only the login form`);
@@ -797,7 +975,9 @@ if (CRAWL_DISABLED) {
     // and hit /logout. Recover THIS worker's context (re-navigate the
     // intended route once the token settles) without affecting siblings.
     reAuth: async (page, intendedUrl) => {
-      const recovered = authState ? await recoverSession(page, intendedUrl, console) : false;
+      const recovered = authState
+        ? await serializedRecover(() => recoverSession(page, intendedUrl, console))
+        : false;
       if (!recovered) await maybeLogin(page, console);
     },
 

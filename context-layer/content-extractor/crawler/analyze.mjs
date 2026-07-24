@@ -185,6 +185,8 @@ for (const resp of responses) {
       origin: u.origin,
       path: tpl,
       isApi: false,
+      blocked: false,             // spec-15: true if the mutation-guard intercepted this write (no server hit)
+      interceptedSamples: 0,      // how many times we clicked it and blocked it at the wire
       samples: 0,
       statusCounts: {},
       pageUrls: new Set(),
@@ -277,6 +279,44 @@ for (const resp of responses) {
       e.responseBodiesByStatus[resp.status] = { _text: buf.toString('utf8').slice(0, 500) };
     }
   }
+}
+
+// ---- spec-15: fold in BLOCKED writes (they have no response) ----
+// The loop above is response-driven, so a mutation the guard aborted never
+// appears — yet it's a real, testable endpoint we DID exercise (clicked the
+// control, captured the request), just didn't let fire. Add them flagged
+// `blocked:true` so the host sees the full API surface incl. the destructive
+// calls, and the generator can turn them into (sandbox-run) tests.
+for (const r of requests) {
+  if (!r.blocked) continue;
+  if (STATIC_RE.test(r.url)) continue;
+  let u; try { u = new URL(r.url); } catch { continue; }
+  const tpl = templatePath(u.pathname);
+  const key = epKey(r.method, u.origin, tpl);
+  if (!endpoints.has(key)) {
+    endpoints.set(key, {
+      method: r.method, origin: u.origin, path: tpl,
+      isApi: true, blocked: true, interceptedSamples: 0, samples: 0,
+      statusCounts: {}, pageUrls: new Set(), queryParamNames: new Set(),
+      contentTypes: {}, avgBytes: 0, _byteSum: 0, _byteN: 0,
+      avgTimingMs: 0, _msSum: 0, _msN: 0, requestBodies: [],
+      responseBodiesByStatus: {}, observedAuth: { bearer: false, cookie: false, none: false },
+      _redirected: [], requestHeaderSamples: {}, responseHeaderSamples: {},
+      requestHeaderNames: new Set(), responseHeaderNames: new Set(),
+    });
+  }
+  const e = endpoints.get(key);
+  e.blocked = true;
+  e.isApi = true;
+  e.interceptedSamples++;
+  if (r.pageUrl) e.pageUrls.add(r.pageUrl);
+  for (const k of u.searchParams.keys()) e.queryParamNames.add(k);
+  if (r.postData && e.requestBodies.length < 3) {
+    try { e.requestBodies.push(JSON.parse(r.postData)); }
+    catch { e.requestBodies.push({ _raw: String(r.postData).slice(0, 500) }); }
+  }
+  const auth = (r.headers || {}).authorization || (r.headers || {}).Authorization;
+  if (auth?.toLowerCase().startsWith('bearer ')) e.observedAuth.bearer = true;
 }
 
 // ---- build page records ----
@@ -437,6 +477,8 @@ const endpointList = [...endpoints.values()].map(e => ({
   origin: e.origin,
   path: e.path,
   isApi: e.isApi,
+  blocked: e.blocked,                         // spec-15: guard intercepted this write (never hit the server)
+  interceptedSamples: e.interceptedSamples,   // times we clicked it + blocked it at the wire
   samples: e.samples,
   statusCounts: e.statusCounts,
   contentTypes: e.contentTypes,

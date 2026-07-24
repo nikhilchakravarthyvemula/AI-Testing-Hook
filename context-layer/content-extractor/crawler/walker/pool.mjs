@@ -55,6 +55,7 @@ export async function runWalkerPool(opts) {
     sameOrigin = null,
     safeRe,
     destrRe,
+    neverRe,
     maxClicksPerPage = Infinity,
     maxListItemsPerNav,        // worker.mjs has its own default
     maxDepth = 5,
@@ -64,6 +65,8 @@ export async function runWalkerPool(opts) {
     postNavWaitMs = 1500,
     preDiscovery = (process.env.CRAWL_PREDISCOVERY ?? '1') !== '0',
     onContextReady,
+    onAuthWarmed,          // (storageState) → void: called after the first context authenticates
+    serializeAuth = false, // true → warm ONE context, snapshot its session, seed + stagger the rest
     reAuth,
     recordPage,
     log = console.log.bind(console),
@@ -124,7 +127,7 @@ export async function runWalkerPool(opts) {
         continue;
       }
 
-      const scan = await scanInteractables(dpage, { safeRe, destrRe, sameOrigin });
+      const scan = await scanInteractables(dpage, { safeRe, destrRe, neverRe, sameOrigin });
       const navs = scan.items.filter(it => it.kind === 'nav' && !it.rejected && it.href);
 
       // Build a set of unique same-origin absolute URLs.
@@ -151,6 +154,15 @@ export async function runWalkerPool(opts) {
       log(`[walker-pool] discovery: ${seed.url} → +${added} route(s) (${navs.length} nav anchor(s) on page)`);
     }
 
+    // Auth warm-up: the discovery context is the ONE worker that logs in. Snapshot
+    // its established session so the fan-out workers start authenticated with the
+    // SAME (freshly-rotated) token — no parallel refresh race, no re-login.
+    if (serializeAuth && onAuthWarmed) {
+      try {
+        await onAuthWarmed(await dctx.storageState());
+        log(`[walker-pool] discovery worker authenticated → captured its session; fan-out workers will start logged in`);
+      } catch (e) { log(`[walker-pool] auth capture failed: ${e.message}`); }
+    }
     await dctx.close().catch(() => {});
     log(`[walker-pool] discovery done — queue size = ${state.queueLength}`);
   }
@@ -172,12 +184,36 @@ export async function runWalkerPool(opts) {
     contexts.push({ ctx, page, workerId: i + 1 });
   }
 
-  await Promise.all(contexts.map(async ({ ctx, page, workerId }) => {
+  const STAGGER_MS = Number(process.env.WORKER_STAGGER_MS) || 2500;
+  const readyOne = async ({ ctx, page, workerId }) => {
     if (onContextReady) {
       try { await onContextReady(ctx, page, workerId); }
       catch (e) { log(`[walker-pool] context ${workerId} setup failed: ${e.message}`); }
     }
-  }));
+  };
+  const discoveryWarmed = serializeAuth && preDiscovery && seedTasks.length > 0;
+
+  if (serializeAuth && contexts.length > 1 && onContextReady && !discoveryWarmed) {
+    // No discovery phase to log in for us → warm up ONE context here first,
+    // snapshot its session, THEN fan out the rest (single-worker-until-login).
+    const [first, ...rest] = contexts;
+    await readyOne(first);
+    try { const fresh = await first.ctx.storageState(); if (fresh && onAuthWarmed) await onAuthWarmed(fresh); } catch {}
+    log(`[walker-pool] auth warm-up done (worker ${first.workerId}); fanning out ${rest.length} more with the session`);
+    await Promise.all(rest.map(async (c, idx) => {
+      await new Promise(r => setTimeout(r, (idx + 1) * STAGGER_MS));
+      await readyOne(c);
+    }));
+  } else if (serializeAuth && contexts.length > 1 && onContextReady) {
+    // Discovery already logged in and seeded the shared session → bring the
+    // workers up STAGGERED so their first loads don't collide on /oidc/refresh.
+    await Promise.all(contexts.map(async (c, idx) => {
+      await new Promise(r => setTimeout(r, idx * STAGGER_MS));
+      await readyOne(c);
+    }));
+  } else {
+    await Promise.all(contexts.map(readyOne));   // no auth → plain parallel
+  }
 
   // ── checkpointing ─────────────────────────────────────────────────────
   // If a path is provided, periodically serialize SharedState to it so a
@@ -204,7 +240,7 @@ export async function runWalkerPool(opts) {
   const promises = contexts.map(({ page, workerId }) =>
     runWorker({
       workerId, state, page,
-      sameOrigin, safeRe, destrRe,
+      sameOrigin, safeRe, destrRe, neverRe,
       maxClicksPerPage, maxListItemsPerNav, postNavWaitMs,
       log, recordPage, reAuth,
       scannerFn,

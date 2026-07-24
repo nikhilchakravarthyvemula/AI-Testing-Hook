@@ -80,6 +80,8 @@ export function build(sources) {
       method,
       path: epPath,
       origin: ep.origin,
+      blocked: ep.blocked ?? false,                    // spec-15: guard intercepted this write (never hit the server)
+      interceptedSamples: ep.interceptedSamples ?? 0,  // times we clicked it + blocked it at the wire
       statusCounts: ep.statusCounts,
       contentTypes: ep.contentTypes,
       observedAuth: ep.observedAuth,
