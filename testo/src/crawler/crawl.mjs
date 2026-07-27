@@ -848,27 +848,12 @@ async function ensureInteractiveLogin() {
   return _interactiveLoginPromise;
 }
 
-// Shared helper: inject saved auth-state.json cookies + localStorage into
-// a fresh BrowserContext. The walker calls this once per worker context
-// during onContextReady.
-// ────────────────────────────────────────────────────────────────────────
-const injectedContexts = new WeakSet();
-async function injectAuthState(page) {
-  if (!authState) return;
-  const ctx = page.context();
-  if (injectedContexts.has(ctx)) return;
-  injectedContexts.add(ctx);
-  if (authState.cookies?.length) await ctx.addCookies(authState.cookies);
-  for (const origin of authState.origins || []) {
-    const items = (origin.localStorage || []).map(i => [i.name, i.value]);
-    if (!items.length) continue;
-    await ctx.addInitScript(({ origin: o, items: kv }) => {
-      if (window.location.origin === o) {
-        for (const [k, v] of kv) { try { localStorage.setItem(k, v); } catch {} }
-      }
-    }, { origin: origin.origin, items });
-  }
-}
+// Session injection is handled by the walker pool at CONTEXT CREATION via
+// browser.newContext({ storageState }) (see storageStateProvider below) — the
+// single source of truth for cookies + localStorage + IndexedDB. There is no
+// per-page re-injection helper any more: re-adding cookies after creation
+// double-injected and could reintroduce a rotated SSO cookie (the multi-worker
+// race). Mid-run interactive-login recovery does its own targeted addCookies.
 
 // ── unified parallel DFS walker (single pass — Crawlee BFS retired) ─────
 //
@@ -968,7 +953,11 @@ if (CRAWL_DISABLED) {
     // session is actually logged in. The check matters because the
     // auth-state.json on disk may be for a different target entirely.
     onContextReady: async (ctx, page, workerId) => {
-      await injectAuthState(page);
+      // NOTE: no injectAuthState() here — the pool creates every context via
+      // browser.newContext({ storageState }) using storageStateProvider (→ the
+      // live `authState`), so cookies + localStorage + IndexedDB are already
+      // restored at CREATION time. Re-adding them here would double-inject and
+      // could reintroduce a stale/rotated cookie (the multi-worker SSO race).
       attachListeners(page, BASE_URL);
       await page.goto(`${BASE_URL}${SEED_PATH}`, { waitUntil: 'domcontentloaded' }).catch(() => {});
       await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});

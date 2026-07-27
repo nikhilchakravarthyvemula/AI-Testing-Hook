@@ -13,6 +13,10 @@ __pycache__/
 # generated crawl/test artifacts (regenerable)
 output/
 
+# generated Playwright specs - e2e.mjs wipes _ rewrites these every run.
+# The scaffold (tests/playwright.config.mjs, tests/helpers/**) IS committed.
+tests/e2e/
+
 # local harness config
 .claude/settings.local.json
 

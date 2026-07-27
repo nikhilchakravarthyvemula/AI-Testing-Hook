@@ -23,6 +23,17 @@ const REPO_ROOT = path.resolve(__dirname, '..');      // byo-llm-poc/ sits at re
 const OUT = path.join(REPO_ROOT, 'output');
 const RUN_ENTRY = path.join(REPO_ROOT, 'context-layer', 'content-extractor', 'run.mjs');
 const INDEX_ENTRY = path.join(REPO_ROOT, 'testo', 'src', 'indexer', 'index.mjs');   // spec-16: indexer moved to testo
+const E2E_GEN_ENTRY = path.join(REPO_ROOT, 'testo', 'src', 'crawler', 'generator', 'e2e.mjs');
+const PW_CONFIG = path.join(REPO_ROOT, 'tests', 'playwright.config.mjs');
+const PW_BIN = path.join(REPO_ROOT, 'node_modules', '.bin', 'playwright');
+const GEN_DIR = path.join(OUT, 'generation');
+const API_RESULTS = path.join(GEN_DIR, 'api-tests', 'results.json');
+const E2E_RESULTS = path.join(GEN_DIR, 'e2e', 'results.json');
+
+// safe (default): execute only read-only operations; mutating ones are
+// generated but not run. full: execute everything except the always-protected
+// catastrophic/session-breaking set (logout, password reset, delete-self).
+function normMode(m) { return String(m || 'safe').toLowerCase() === 'full' ? 'full' : 'safe'; }
 
 // ── stdout is JSON-only; everything else goes to stderr + a run log ──────────
 let LOG_FILE = null;
@@ -407,21 +418,145 @@ function runSkill(kv, label) {
   });
 }
 
+// ── UI test generation + execution (Playwright) ──────────────────────────────
+// The UI half of the hybrid. e2e.mjs writes specs from the crawler's
+// click-graph + routes (codebase optional); Playwright runs them authenticated
+// via the crawler's saved storageState. TEST_MODE gates mutating specs.
+function runE2eGen(mode, baseUrl) {
+  const env = { ...process.env, TEST_MODE: mode };
+  if (baseUrl) env.BASE_URL = baseUrl;
+  return runNode(E2E_GEN_ENTRY, env, 'e2e-gen');
+}
+
+function runPlaywright(mode, baseUrl) {
+  const env = { ...process.env, TEST_MODE: mode };
+  if (baseUrl) env.BASE_URL = baseUrl;
+  return new Promise((resolve) => {
+    if (!fs.existsSync(PW_BIN)) { log('[ctx] ✗ playwright not installed at node_modules/.bin/playwright'); return resolve(1); }
+    log(`[ctx] → e2e-run (playwright, mode=${mode})`);
+    const child = spawn(PW_BIN, ['test', '--config', PW_CONFIG], { cwd: REPO_ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    child.stdout.on('data', (d) => log('  [e2e-run] ' + d.toString().replace(/\n$/, '')));
+    child.stderr.on('data', (d) => log('  [e2e-run] ' + d.toString().replace(/\n$/, '')));
+    child.on('error', (e) => { log(`[ctx] ✗ e2e-run spawn error: ${e.message}`); resolve(1); });
+    // Playwright exits non-zero when tests FAIL — that's data, not a crash.
+    child.on('exit', (code) => { log(`[ctx] e2e-run exit ${code}`); resolve(code ?? 1); });
+  });
+}
+
+// ── unified report: every API + UI test in one place ─────────────────────────
+// Reads both suites' results.json and produces output/generation/report.{json,md}
+// listing EVERY test — passed, failed, and skipped (with reason). This is the
+// single artifact the user reviews after a run.
+function collectApiTests(res) {
+  if (!res) return [];
+  const out = [];
+  for (const t of res.tests || []) {
+    out.push({ suite: 'api', name: `${t.method} ${t.url}`, status: t.ok ? 'passed' : 'failed',
+               detail: t.http_status != null ? `HTTP ${t.http_status}` : (t.error || ''), reason: null });
+  }
+  for (const s of res.skipped || []) {
+    out.push({ suite: 'api', name: `${s.method} ${s.path}`, status: 'skipped', detail: '', reason: s.reason || 'exempt' });
+  }
+  return out;
+}
+
+function collectUiTests(res) {
+  // Playwright JSON reporter: nested suites → specs → tests → results.
+  if (!res) return [];
+  const out = [];
+  const visit = (suite) => {
+    for (const spec of suite.specs || []) {
+      const test = (spec.tests || [])[0] || {};
+      const result = (test.results || [])[0] || {};
+      const st = result.status || test.status || 'unknown';
+      const status = st === 'skipped' ? 'skipped' : (spec.ok ? 'passed' : 'failed');
+      const skipAnno = (test.annotations || []).find((a) => a.type === 'skip');
+      out.push({
+        suite: 'ui', name: spec.title || spec.file || 'ui-test', status,
+        detail: spec.file ? path.basename(spec.file) : '',
+        reason: status === 'skipped' ? (skipAnno?.description || 'safe-mode') : null,
+      });
+    }
+    for (const child of suite.suites || []) visit(child);
+  };
+  for (const s of res.suites || []) visit(s);
+  return out;
+}
+
+function buildUnifiedReport({ mode, apiRes, uiRes, runId }) {
+  const rows = [...collectApiTests(apiRes), ...collectUiTests(uiRes)];
+  const tally = (suite) => {
+    const r = rows.filter((x) => !suite || x.suite === suite);
+    return {
+      total: r.length,
+      passed: r.filter((x) => x.status === 'passed').length,
+      failed: r.filter((x) => x.status === 'failed').length,
+      skipped: r.filter((x) => x.status === 'skipped').length,
+    };
+  };
+  const summary = {
+    generatedAt: new Date().toISOString(),
+    runId, mode,
+    totals: tally(null),
+    api: tally('api'),
+    ui: tally('ui'),
+    tests: rows,
+  };
+  fs.mkdirSync(GEN_DIR, { recursive: true });
+  fs.writeFileSync(path.join(GEN_DIR, 'report.json'), JSON.stringify(summary, null, 2));
+
+  const icon = (s) => (s === 'passed' ? '✓' : s === 'failed' ? '✗' : '⊘');
+  const md = [];
+  md.push(`# Test Run Report — mode: \`${mode}\``);
+  md.push('');
+  md.push(`_generated ${summary.generatedAt} · run ${runId}_`);
+  md.push('');
+  md.push(`**Total ${summary.totals.total}** — ✓ ${summary.totals.passed} passed · ✗ ${summary.totals.failed} failed · ⊘ ${summary.totals.skipped} skipped`);
+  md.push('');
+  md.push(`| API: ${summary.api.passed}/${summary.api.total} passed (${summary.api.skipped} skipped) | UI: ${summary.ui.passed}/${summary.ui.total} passed (${summary.ui.skipped} skipped) |`);
+  md.push('|---|---|');
+  md.push('');
+  for (const suite of ['api', 'ui']) {
+    const r = rows.filter((x) => x.suite === suite);
+    if (!r.length) continue;
+    md.push(`## ${suite.toUpperCase()} tests (${r.length})`);
+    md.push('');
+    md.push('| | Test | Status | Detail / Reason |');
+    md.push('|---|---|---|---|');
+    for (const x of r) {
+      md.push(`| ${icon(x.status)} | ${x.name} | ${x.status} | ${x.reason || x.detail || ''} |`);
+    }
+    md.push('');
+  }
+  fs.writeFileSync(path.join(GEN_DIR, 'report.md'), md.join('\n'));
+  return summary;
+}
+
 async function cmdGenerate(opts) {
   if (!readJson(path.join(OUT, 'indexed_output', 'apis.json')))
     return die('no output/indexed_output/apis.json — run `ctx scan` first', 1);
   const runId = opts.runId || newRunId();
+  const mode = normMode(opts.mode);
   openLog(runId);
+
+  // Hybrid: write BOTH suites, run NEITHER. API curls + Playwright specs.
   const { code, result } = await runSkill(
-    { execute: 'false', base_url: opts.url || null, max_tests: opts.maxTests || null }, 'generate');
+    { execute: 'false', test_mode: mode, base_url: opts.url || null, max_tests: opts.maxTests || null }, 'generate');
   const r = result || {};
-  log(`[generator] ${r.curls_generated ?? 0} curls generated → output/generation/api-tests/curls/`);
-  const ok = code === 0 && !!r.ok;
+  log(`[generator] ${r.curls_generated ?? 0} API curls → output/generation/api-tests/curls/`);
+
+  const e2eCode = await runE2eGen(mode, opts.url);
+  const e2eIndex = readJson(path.join(REPO_ROOT, 'tests', 'e2e', '_index.json')) || {};
+
+  const ok = code === 0 && !!r.ok && e2eCode === 0;
   emit({
-    ok, run_id: runId, tool: 'generate',
-    counts: { curls_generated: r.curls_generated ?? 0 },
-    output: 'output/generation/api-tests/',
-    results: 'output/generation/api-tests/results.json',
+    ok, run_id: runId, tool: 'generate', mode,
+    counts: {
+      api_curls: r.curls_generated ?? 0,
+      ui_specs: Object.values(e2eIndex).reduce((n, v) => n + (v?.count || 0), 0),
+      ui_breakdown: e2eIndex,
+    },
+    output: { api: 'output/generation/api-tests/', ui: 'tests/e2e/' },
     error: r.error ?? null,
     log: LOG_FILE ? path.relative(REPO_ROOT, LOG_FILE) : null,
   });
@@ -432,25 +567,46 @@ async function cmdExecute(opts) {
   if (!readJson(path.join(OUT, 'indexed_output', 'apis.json')))
     return die('no output/indexed_output/apis.json — run `ctx scan` first', 1);
   const runId = opts.runId || newRunId();
+  const mode = normMode(opts.mode);
   openLog(runId);
+  log(`[ctx] execute — mode=${mode} (safe: read-only executed, mutations skipped; full: all except catastrophic)`);
+
+  // ── API suite: generate + run ────────────────────────────────────────────
   const { code, result } = await runSkill(
-    { execute: 'true', base_url: opts.url || null, max_tests: opts.maxTests || null }, 'execute');
+    { execute: 'true', test_mode: mode, base_url: opts.url || null, max_tests: opts.maxTests || null }, 'execute');
   const r = result || {};
-  log(`[generator] ${r.curls_generated ?? 0} curls generated → output/generation/api-tests/curls/`);
-  log(`[executor] ${r.curls_executed ?? 0} tests run — ${r.passed ?? 0} passed, ${r.failed ?? 0} failed, ${r.skipped ?? 0} skipped`);
-  const ok = code === 0 && !!r.ok;
+  log(`[api] ${r.curls_executed ?? 0} run — ${r.passed ?? 0} passed, ${r.failed ?? 0} failed, ${r.skipped ?? 0} skipped`);
+
+  // ── UI suite: generate specs + run Playwright (authenticated via crawler session) ──
+  await runE2eGen(mode, opts.url);
+  const e2eRunCode = await runPlaywright(mode, opts.url);
+
+  // ── unified report over BOTH suites ───────────────────────────────────────
+  const apiRes = readJson(API_RESULTS);
+  const uiRes = readJson(E2E_RESULTS);
+  const report = buildUnifiedReport({ mode, apiRes, uiRes, runId });
+  log(`[report] ${report.totals.total} tests — ${report.totals.passed} passed, ${report.totals.failed} failed, ${report.totals.skipped} skipped → output/generation/report.md`);
+
+  // ok = API skill ok AND no UI test unexpectedly failed. Skips never fail the run.
+  const ok = code === 0 && !!r.ok && report.totals.failed === 0;
   emit({
-    ok, run_id: runId, tool: 'execute',
+    ok, run_id: runId, tool: 'execute', mode,
     counts: {
-      curls_generated: r.curls_generated ?? 0,
-      executed: r.curls_executed ?? 0,
-      passed: r.passed ?? 0,
-      failed: r.failed ?? 0,
-      skipped: r.skipped ?? 0,
+      total: report.totals.total,
+      passed: report.totals.passed,
+      failed: report.totals.failed,
+      skipped: report.totals.skipped,
+      api: report.api,
+      ui: report.ui,
     },
     loginOk: r.login_succeeded ?? false,
-    results: 'output/generation/api-tests/results.json',
-    report: 'output/generation/api-tests/report.md',
+    report: 'output/generation/report.md',
+    reportJson: 'output/generation/report.json',
+    suites: {
+      api: 'output/generation/api-tests/results.json',
+      ui: 'output/generation/e2e/results.json',
+      uiHtml: 'output/generation/e2e/html/index.html',
+    },
     error: r.error ?? null,
     log: LOG_FILE ? path.relative(REPO_ROOT, LOG_FILE) : null,
   });
@@ -483,6 +639,7 @@ function parseArgs(argv) {
       case '--run-id': o.runId = next(); break;
       case '--reuse': o.reuse = true; break;
       case '--max-tests': o.maxTests = parseInt(next(), 10) || 0; break;
+      case '--mode': o.mode = normMode(next()); break;   // safe (default) | full
       case '--json': o.json = true; break;   // accepted; JSON is always the output
       default:
         if (a.startsWith('-')) return die(`unknown option "${a}"`);
@@ -508,10 +665,15 @@ Commands:
         Emit the consumable indexed context (or one topic) for the host.
   ctx annotate-intents <delegation-dir> --run-id R [--json]
         Merge host-produced click-intents back into the crawler bundle.
-  ctx generate [--url <URL>] [--max-tests N] [--json]
-        Build curl API tests from the indexed context (writes only, no run).
-  ctx execute [--url <URL>] [--max-tests N] [--json]
-        Generate AND run the API tests against the live target.
+  ctx generate [--url <URL>] [--mode safe|full] [--max-tests N] [--json]
+        Build BOTH suites — API curls + UI/Playwright specs — writes only, no run.
+  ctx execute [--url <URL>] [--mode safe|full] [--max-tests N] [--json]
+        Generate AND run both suites against the live target, then write a
+        unified report (output/generation/report.md) listing every test.
+        --mode safe (default): execute read-only ops only; mutating ops are
+          generated but skipped (shown in the report with a reason).
+        --mode full: execute everything EXCEPT the always-protected catastrophic
+          set (logout, password reset, delete-self/account).
         Login creds via env: LOGIN_EMAIL / LOGIN_PASSWORD (never flags).
 
 Every command prints exactly one JSON object to stdout; logs go to stderr.

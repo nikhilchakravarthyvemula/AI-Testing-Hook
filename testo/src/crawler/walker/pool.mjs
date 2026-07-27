@@ -193,14 +193,6 @@ export async function runWalkerPool(opts) {
     log(`[walker-pool] sized workers to ${effectiveWorkers} (queue=${state.queueLength}, requested=${workerCount})`);
   }
 
-  // ── per-worker context setup (parallel) ───────────────────────────────
-  const contexts = [];
-  for (let i = 0; i < effectiveWorkers; i++) {
-    const ctx  = await newSeededContext();
-    const page = await ctx.newPage();
-    contexts.push({ ctx, page, workerId: i + 1 });
-  }
-
   const STAGGER_MS = Number(process.env.WORKER_STAGGER_MS) || 2500;
   const readyOne = async ({ ctx, page, workerId }) => {
     if (onContextReady) {
@@ -208,22 +200,46 @@ export async function runWalkerPool(opts) {
       catch (e) { log(`[walker-pool] context ${workerId} setup failed: ${e.message}`); }
     }
   };
-  const discoveryWarmed = serializeAuth && preDiscovery && seedTasks.length > 0;
 
-  if (serializeAuth && contexts.length > 1 && onContextReady && !discoveryWarmed) {
-    // No discovery phase to log in for us → warm up ONE context here first,
-    // snapshot its session, THEN fan out the rest (single-worker-until-login).
-    const [first, ...rest] = contexts;
-    await readyOne(first);
-    try { const fresh = await first.ctx.storageState({ indexedDB: true }); if (fresh && onAuthWarmed) await onAuthWarmed(fresh); } catch {}
-    log(`[walker-pool] auth warm-up done (worker ${first.workerId}); fanning out ${rest.length} more with the session`);
-    await Promise.all(rest.map(async (c, idx) => {
-      await new Promise(r => setTimeout(r, (idx + 1) * STAGGER_MS));
-      await readyOne(c);
-    }));
-  } else if (serializeAuth && contexts.length > 1 && onContextReady) {
-    // Discovery already logged in and seeded the shared session → bring the
-    // workers up STAGGERED so their first loads don't collide on /oidc/refresh.
+  // ── AUTH WARM-UP — MUST finish BEFORE the fan-out contexts are created ──
+  // The multi-worker SSO race: contexts created from the on-disk session all
+  // carry the SAME pre-rotation SSO cookie (e.g. Google `__Host-GAPS`). The
+  // first worker's handshake rotates that cookie server-side; every other
+  // worker then presents an already-rotated cookie → "token already used" →
+  // bounced to /login. THE FIX (Fix A): one context logs in first and captures
+  // the freshly-rotated session; only THEN do we create the fan-out contexts,
+  // so each is seeded from the POST-rotation session (storageStateProvider →
+  // newSeededContext reads the just-updated authState). No stale cookie jar.
+  //
+  // The discovery phase, when enabled, already did this warm-up + capture with
+  // its own throwaway context — so we skip the dedicated one here. We also skip
+  // it for a single worker (no race with only one context).
+  const discoveryWarmed = serializeAuth && preDiscovery && seedTasks.length > 0;
+  if (serializeAuth && onContextReady && effectiveWorkers > 1 && !discoveryWarmed) {
+    log(`[walker-pool] auth warm-up — one context logs in first, then fan-out contexts are built from its fresh session`);
+    const warmCtx  = await newSeededContext();
+    const warmPage = await warmCtx.newPage();
+    await readyOne({ ctx: warmCtx, page: warmPage, workerId: 0 });
+    try {
+      const fresh = await warmCtx.storageState({ indexedDB: true });
+      if (fresh && onAuthWarmed) await onAuthWarmed(fresh);
+      log(`[walker-pool] auth warm-up captured the rotated session — fan-out will start authenticated`);
+    } catch (e) { log(`[walker-pool] auth warm-up capture failed: ${e.message}`); }
+    await warmCtx.close().catch(() => {});
+  }
+
+  // ── CREATE FAN-OUT CONTEXTS (AFTER warm-up → each gets the fresh session) ──
+  const contexts = [];
+  for (let i = 0; i < effectiveWorkers; i++) {
+    const ctx  = await newSeededContext();   // storageStateProvider() now returns the rotated session
+    const page = await ctx.newPage();
+    contexts.push({ ctx, page, workerId: i + 1 });
+  }
+
+  // ── BRING WORKERS UP ──────────────────────────────────────────────────
+  // Staggered when auth is involved (so their first loads don't collide on the
+  // silent-refresh endpoint); plain-parallel when there's no auth.
+  if (serializeAuth && contexts.length > 1 && onContextReady) {
     await Promise.all(contexts.map(async (c, idx) => {
       await new Promise(r => setTimeout(r, idx * STAGGER_MS));
       await readyOne(c);

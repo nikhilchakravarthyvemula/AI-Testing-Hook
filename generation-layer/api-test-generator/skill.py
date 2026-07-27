@@ -68,6 +68,16 @@ class ApiTestGeneratorArgs(BaseModel):
     login_password: Optional[str] = Field(default=None, description="Login password.")
     output_dir:     Path = Path("output/generation/api-tests")
     execute:        bool = Field(default=True, description="If false, only write the curl scripts.")
+    test_mode:      str = Field(
+        default="safe",
+        description=(
+            "'safe' (default): execute only read-only methods (GET/HEAD/OPTIONS); "
+            "mutating requests (POST/PUT/PATCH/DELETE) are still generated but NOT "
+            "executed — listed in the report as skipped. 'full': execute everything "
+            "EXCEPT the always-protected catastrophic/session-breaking set (logout, "
+            "token revoke, password reset, delete-self/account) which stay exempt."
+        ),
+    )
     max_tests:      Optional[int] = Field(default=None, ge=1, description="Cap on # APIs to test (None = no cap).")
     timeout_s:      int = Field(default=30, ge=1)
     auth_scheme:    str = Field(default="Bearer", description="`Bearer`, `Token`, `Cookie`, …")
@@ -119,6 +129,9 @@ class ApiTestGeneratorSkill:
     # ── sync engine ────────────────────────────────────────────────────────
 
     def _run_sync(self, args: ApiTestGeneratorArgs) -> ApiTestGeneratorResult:
+        test_mode = (args.test_mode or "safe").lower()
+        if test_mode not in ("safe", "full"):
+            test_mode = "safe"
         repo_root = args.repo_root or _detect_repo_root()
         apis_path  = _resolve(repo_root, args.apis_json)
         db_path    = _resolve(repo_root, args.db_schema_json)
@@ -285,6 +298,15 @@ class ApiTestGeneratorSkill:
             curls_generated += 1
 
             if not args.execute:
+                continue
+
+            # Safe-mode gate: mutating requests are generated (curl written above,
+            # inspectable) but never executed against the live target. Recorded
+            # as skipped so the unified report shows EVERY test with its reason.
+            if test_mode == "safe" and api_method not in ("GET", "HEAD", "OPTIONS"):
+                skipped_items.append({"method": api_method, "path": api_path,
+                                      "reason": "safe-mode (mutating method not executed)"})
+                print(f"  ⊘ {api_method:6} {api_path:60} → skipped (safe-mode)", flush=True)
                 continue
 
             method = (primary.get("method") or "GET").upper()

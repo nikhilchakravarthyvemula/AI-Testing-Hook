@@ -110,16 +110,18 @@ def write_report(
     lines.append(f"- total:    **{stats['total']}**")
     lines.append(f"- passed:   **{stats['passed']}**  ({stats['passed_pct']:.0f}%)")
     lines.append(f"- failed:   **{stats['failed']}**")
-    lines.append(f"- skipped:  **{len(skipped)}**  (session-safety exemptions)")
+    lines.append(f"- skipped:  **{len(skipped)}**  (not executed — see below)")
     lines.append(f"- by status: {stats['by_status']}")
     lines.append("")
     if skipped:
-        lines.append("## Skipped (exempt — not executed)")
+        lines.append("## Skipped (generated but not executed)")
         lines.append("")
-        lines.append("These endpoints would break the authenticated session "
-                     "(password reset, logout, delete-self) and were skipped.")
+        lines.append("Each was generated (curl written) but not run — either the "
+                     "run is in safe-mode (mutating method) or the endpoint is in "
+                     "the always-protected catastrophic set (logout, password "
+                     "reset, delete-self).")
         for s in skipped:
-            lines.append(f"- `{s.get('method')} {s.get('path')}`  ← exempt: `{s.get('reason')}`")
+            lines.append(f"- `{s.get('method')} {s.get('path')}`  ← reason: `{s.get('reason')}`")
         lines.append("")
     lines.append("## Failures")
     for t in test_results:
