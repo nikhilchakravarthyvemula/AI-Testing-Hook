@@ -13,5 +13,7 @@ __pycache__/
 # generated crawl/test artifacts (regenerable)
 output/
 
+e2e/
+
 # local harness config
 .claude/settings.local.json
