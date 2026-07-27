@@ -4,9 +4,9 @@
 // owns the sequence of sub-components that turn raw inputs into
 // indexed context material (output/indexed_output).
 //
-// Today only the content-extractor exists. As the other sub-components
-// land (gap-analyzer, knowledge-synthesizer, feature-extractor,
-// mind-map-builder), this file becomes a small pipeline orchestrator:
+// Live today: content-extractor → indexer → knowledge-synthesizer →
+// graph-viewer. As the remaining sub-components land (gap-analyzer,
+// feature-extractor, mind-map-builder), they slot into this pipeline:
 //
 //   inputs
 //     ↓
@@ -41,6 +41,11 @@ const STAGES = [
     id: 'indexer',
     entrypoint: path.join(__dirname, '..', 'testo', 'src', 'indexer', 'index.mjs'),   // spec-16: indexer moved to testo
     description: 'Synthesise per-topic indices (apis, routes, pages, models, …) from all sources',
+  },
+  {
+    id: 'knowledge-synthesizer',
+    entrypoint: path.join(__dirname, 'knowledge-synthesizer', 'synthesize.mjs'),
+    description: 'Reconcile exact-key duplicates into one trustworthy CanonicalFact per entity',
   },
   {
     id: 'graph-viewer',
