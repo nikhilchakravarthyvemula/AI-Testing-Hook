@@ -67,6 +67,12 @@ export async function runWalkerPool(opts) {
     onContextReady,
     onAuthWarmed,          // (storageState) → void: called after the first context authenticates
     serializeAuth = false, // true → warm ONE context, snapshot its session, seed + stagger the rest
+    // () → storageState|null: saved session injected at CONTEXT CREATION.
+    // Required for IndexedDB-based sessions (Firebase Auth et al) — those
+    // cannot be added to an existing context via addCookies/addInitScript,
+    // only via browser.newContext({ storageState }). A provider (not a plain
+    // value) so post-warm-up rotations are picked up by later contexts.
+    storageStateProvider = null,
     reAuth,
     recordPage,
     log = console.log.bind(console),
@@ -101,6 +107,17 @@ export async function runWalkerPool(opts) {
 
   const browser = await chromium.launch({ headless });
 
+  // Create a context pre-seeded with the saved session (cookies + localStorage
+  // + IndexedDB). Falls back to a bare context when there's no saved state.
+  const newSeededContext = async () => {
+    const ss = storageStateProvider?.();
+    try { return await browser.newContext(ss ? { storageState: ss } : {}); }
+    catch (e) {
+      log(`[walker-pool] storageState injection failed (${e.message.split('\n')[0]}) — starting context unauthenticated`);
+      return browser.newContext();
+    }
+  };
+
   // ── PRE-DISCOVERY PHASE ───────────────────────────────────────────────
   // Optional: scan each seed in a single throwaway context to populate
   // the queue with discovered nav URLs BEFORE the parallel workers
@@ -110,7 +127,7 @@ export async function runWalkerPool(opts) {
   // so the per-page state edges still get captured by the pool.
   if (preDiscovery && seedTasks.length > 0) {
     log(`[walker-pool] discovery phase — scanning ${seedTasks.length} seed(s) to enumerate routes`);
-    const dctx = await browser.newContext();
+    const dctx = await newSeededContext();
     const dpage = await dctx.newPage();
     if (onContextReady) {
       try { await onContextReady(dctx, dpage, 0); }
@@ -159,7 +176,7 @@ export async function runWalkerPool(opts) {
     // SAME (freshly-rotated) token — no parallel refresh race, no re-login.
     if (serializeAuth && onAuthWarmed) {
       try {
-        await onAuthWarmed(await dctx.storageState());
+        await onAuthWarmed(await dctx.storageState({ indexedDB: true }));
         log(`[walker-pool] discovery worker authenticated → captured its session; fan-out workers will start logged in`);
       } catch (e) { log(`[walker-pool] auth capture failed: ${e.message}`); }
     }
@@ -179,7 +196,7 @@ export async function runWalkerPool(opts) {
   // ── per-worker context setup (parallel) ───────────────────────────────
   const contexts = [];
   for (let i = 0; i < effectiveWorkers; i++) {
-    const ctx  = await browser.newContext();
+    const ctx  = await newSeededContext();
     const page = await ctx.newPage();
     contexts.push({ ctx, page, workerId: i + 1 });
   }
@@ -198,7 +215,7 @@ export async function runWalkerPool(opts) {
     // snapshot its session, THEN fan out the rest (single-worker-until-login).
     const [first, ...rest] = contexts;
     await readyOne(first);
-    try { const fresh = await first.ctx.storageState(); if (fresh && onAuthWarmed) await onAuthWarmed(fresh); } catch {}
+    try { const fresh = await first.ctx.storageState({ indexedDB: true }); if (fresh && onAuthWarmed) await onAuthWarmed(fresh); } catch {}
     log(`[walker-pool] auth warm-up done (worker ${first.workerId}); fanning out ${rest.length} more with the session`);
     await Promise.all(rest.map(async (c, idx) => {
       await new Promise(r => setTimeout(r, (idx + 1) * STAGGER_MS));

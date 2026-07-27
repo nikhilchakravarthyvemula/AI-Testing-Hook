@@ -26,6 +26,8 @@ import path from 'node:path';
 import readline from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 
+import { attemptSsoLogin } from './auth/sso.mjs';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 const OUT_DIR = path.join(REPO_ROOT, 'output', 'crawler');
@@ -130,7 +132,21 @@ async function autoLoginLoop(page) {
 
     const action = await tryFillLoginStep(page);
     console.log(`  step ${i + 1}: at ${before.slice(0, 90)}${before.length > 90 ? '…' : ''}  → ${action}`);
-    if (action === 'nothing-here') return;
+
+    if (action === 'nothing-here') {
+      // No fillable form on THIS page — check for a "Sign in with <provider>"
+      // button (Google/Microsoft/GitHub/Okta/…) and drive it automatically.
+      // Stops at MFA/CAPTCHA/popup by design — complete that by hand in this
+      // same (visible) window; waitForAuthenticatedLanding() below keeps
+      // polling while you do.
+      const sso = await attemptSsoLogin(page, {
+        email: LOGIN_EMAIL, password: LOGIN_PASSWORD,
+        isDone: isAppAuthenticated, log: console,
+      });
+      if (sso.ok) { console.log(`  ✓ authenticated via SSO (${sso.landedUrl})`); return; }
+      console.log(`  [sso] auto-drive stopped: ${sso.reason} — complete the rest by hand in the browser.`);
+      return;
+    }
     await page.waitForTimeout(1500);
     await page.waitForLoadState('networkidle', { timeout: 6000 }).catch(() => {});
 
@@ -184,14 +200,23 @@ async function main() {
   }
 
   const cookies = await ctx.cookies();
-  await ctx.storageState({ path: AUTH_STATE });
+  // indexedDB: true is REQUIRED for Firebase-auth apps — their session
+  // (ID + refresh token) lives in IndexedDB, not cookies/localStorage.
+  // Without it the save "succeeds" but is an empty shell (0 cookies) and
+  // every subsequent crawl bounces straight back to /login.
+  await ctx.storageState({ path: AUTH_STATE, indexedDB: true });
   const saved = JSON.parse(fs.readFileSync(AUTH_STATE, 'utf8'));
   const lsCount = (saved.origins || []).reduce((n, o) => n + (o.localStorage?.length || 0), 0);
+  const idbCount = (saved.origins || []).reduce((n, o) => n + (o.indexedDB?.length || 0), 0);
 
   console.log(`\n[login-once] saved ${path.relative(REPO_ROOT, AUTH_STATE)}`);
   console.log(`  landed at:         ${landed}`);
   console.log(`  cookies:           ${cookies.length}`);
-  console.log(`  localStorage keys: ${lsCount} across ${saved.origins?.length || 0} origin(s)\n`);
+  console.log(`  localStorage keys: ${lsCount} across ${saved.origins?.length || 0} origin(s)`);
+  console.log(`  IndexedDB dbs:     ${idbCount}\n`);
+  if (!cookies.length && !idbCount) {
+    console.warn('  ⚠ neither cookies nor IndexedDB captured — this session will NOT authenticate crawls. Did the login actually complete?\n');
+  }
   console.log('[login-once] next:  npm run all\n');
 
   await browser.close();

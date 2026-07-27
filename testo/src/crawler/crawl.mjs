@@ -27,6 +27,7 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 import { adviseOn } from './llm-advisor/index.mjs';
+import { attemptSsoLogin, EXTERNAL_IDP_RE } from './auth/sso.mjs';
 import { runWalkerPool } from './walker/pool.mjs';
 
 // Per-page scanner: the heuristic walker/scanner.mjs (the only scanner).
@@ -644,6 +645,19 @@ async function maybeLogin(page, log) {
   const hasEmail = await emailLoc.isVisible({ timeout: 400 }).catch(() => false);
   const hasPwd   = await pwdLoc.isVisible({ timeout: 400 }).catch(() => false);
   if (!hasEmail || !hasPwd) {
+    // No fillable form on the app's own login page — it may be a pure
+    // "Sign in with <provider>" button (Google/Microsoft/GitHub/Okta/…).
+    // Click it and drive the resulting IdP's native login deterministically;
+    // this stops at MFA/CAPTCHA/popup, which the interactive fallback handles.
+    if (LOGIN_URL_REGEX.test(page.url()) && (LOGIN_EMAIL || LOGIN_PASSWORD)) {
+      const isDone = (u) => !LOGIN_URL_REGEX.test(u) && !EXTERNAL_IDP_RE.test(u);
+      const sso = await attemptSsoLogin(page, { email: LOGIN_EMAIL, password: LOGIN_PASSWORD, isDone, log: log || console });
+      if (sso.ok) {
+        (log?.info ?? console.log).call(log || console, `[auth] SSO login OK — landed at ${sso.landedUrl}`);
+        return true;
+      }
+      (log?.info ?? console.log).call(log || console, `[auth] SSO auto-drive stopped: ${sso.reason}`);
+    }
     if (LOGIN_URL_REGEX.test(page.url())) {
       // Dump diagnostic so the user can see what's on the page and override
       // LOGIN_EMAIL_SELECTOR / LOGIN_PASSWORD_SELECTOR / LOGIN_SUBMIT_TEXT.
@@ -757,7 +771,7 @@ async function recordPage(page, requestedUrl, navStatus, phase = 'crawl', extra 
 // valid. We recover by letting the refresh settle and RE-navigating the
 // intended route (the refresh cookie is re-sent each time). This is why a
 // route reached by an in-app click worked but a direct goto bounced.
-const _IDP_RE = /accounts\.google\.com|login\.microsoftonline\.com|login\.live\.com|okta\.com|onelogin\.com|auth0\.com|aadcdn\.msftauth\.net/i;
+const _IDP_RE = EXTERNAL_IDP_RE;
 
 async function recoverSession(page, intendedUrl, log) {
   if (!authState) return false;                    // nothing saved → can't recover, fall back to form login
@@ -892,7 +906,16 @@ if (CRAWL_DISABLED) {
 
   console.log(`[crawl] parallel-DFS walker — seeds=${seedTasks.length}  workers=${CRAWL_WORKERS}  headless=${HEADLESS}`);
   seedTasks.forEach(t => console.log(`        seed [${t.phase}]: ${t.url}`));
-  if (authState) console.log(`[crawl] using saved auth-state.json (${authState.cookies?.length || 0} cookies)`);
+  if (authState) {
+    const idbDbs = (authState.origins || []).reduce((n, o) => n + (o.indexedDB?.length || 0), 0);
+    console.log(`[crawl] using saved auth-state.json (${authState.cookies?.length || 0} cookies, ${idbDbs} IndexedDB db(s))`);
+    // A session with NO cookies and NO IndexedDB is an empty shell (e.g. a
+    // Firebase-auth app captured without indexedDB:true) — every worker will
+    // bounce to /login. Warn loudly instead of looping silently.
+    if (!(authState.cookies?.length) && !idbDbs) {
+      console.warn('[crawl] ⚠ saved session has no cookies and no IndexedDB — it cannot authenticate anything. Re-run `npm run login` (the login now captures IndexedDB too).');
+    }
+  }
   console.log(`[crawl]   safe:        /${SAFE_CLICK_REGEX.source}/i`);
   console.log(`[crawl]   destructive (flag, still clicked): /${DESTRUCTIVE_CLICK_REGEX.source}/i`);
   console.log(`[crawl]   never-click (session-breakers, skipped): /${NEVER_CLICK_REGEX.source}/i`);
@@ -917,6 +940,13 @@ if (CRAWL_DISABLED) {
     // Optional: LLM-primary scanner. Default (undefined) → worker uses
     // the heuristic scanInteractables. crawler-llm extractor switches.
     scannerFn,
+
+    // Saved session is injected at CONTEXT CREATION (not post-hoc): this is
+    // the only way IndexedDB-based sessions (Firebase Auth) restore — they
+    // have zero cookies, so addCookies() alone leaves workers logged out.
+    // Provider (not value) so contexts created after the warm-up rotation
+    // pick up the freshest state.
+    storageStateProvider: () => authState,
 
     // Auth warm-up: when we have a saved session, bring up ONE context first
     // (it completes the silent-SSO handshake serially), then fan out the rest
@@ -956,6 +986,13 @@ if (CRAWL_DISABLED) {
       if (/\/(login|signin|sign-in)\b/i.test(page.url())) {
         const ok = await ensureInteractiveLogin();
         if (ok) {
+          // Cookie-based sessions can be adopted mid-run; IndexedDB-based ones
+          // (Firebase) can only be injected at context creation — this worker
+          // stays unauthenticated for THIS run, but the state is saved so the
+          // NEXT run starts fully logged in (via storageStateProvider).
+          if (!(authState.cookies?.length)) {
+            console.warn(`[interact] w${workerId} manual login saved, but the session is IndexedDB-based — cannot adopt it into a live context. Re-run the scan; it will start authenticated.`);
+          }
           try { await page.context().addCookies(authState.cookies || []); } catch {}
           await page.goto(`${BASE_URL}${SEED_PATH}`, { waitUntil: 'domcontentloaded' }).catch(() => {});
           await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
