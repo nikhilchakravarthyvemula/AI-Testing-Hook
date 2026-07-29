@@ -17,12 +17,24 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadFeatureManifest, tagRows, summarizeFeatures } from '../generation-layer/feature-slice/tag.mjs';
+import { buildFeaturePdf } from '../generation-layer/feature-slice/report-pdf.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');      // byo-llm-poc/ sits at repo root
 const OUT = path.join(REPO_ROOT, 'output');
 const RUN_ENTRY = path.join(REPO_ROOT, 'context-layer', 'content-extractor', 'run.mjs');
 const INDEX_ENTRY = path.join(REPO_ROOT, 'testo', 'src', 'indexer', 'index.mjs');   // spec-16: indexer moved to testo
+// Knowledge stages (mirror context-layer/scan.mjs): synthesizer → gap-analyzer →
+// feature-extractor. All deterministic Node ESM (no LLM, no venv). Ordering is a
+// hard dependency: synthesizer writes output/synthesized/facts.json which both
+// others read; gap-analyzer must precede feature-extractor (features roll up gaps).
+const SYNTH_ENTRY = path.join(REPO_ROOT, 'context-layer', 'knowledge-synthesizer', 'synthesize.mjs');
+const GAP_ENTRY = path.join(REPO_ROOT, 'context-layer', 'gap-analyzer', 'analyze.mjs');
+const FEATURE_ENTRY = path.join(REPO_ROOT, 'context-layer', 'feature-extractor', 'extract.mjs');
+// feature-slice resolver: joins features.json fact-IDs to the generators' real
+// inputs (apis.json / routes.json) → output/features/feature-manifest.json.
+const FEATURE_SLICE_ENTRY = path.join(REPO_ROOT, 'generation-layer', 'feature-slice', 'resolve.mjs');
 const E2E_GEN_ENTRY = path.join(REPO_ROOT, 'testo', 'src', 'crawler', 'generator', 'e2e.mjs');
 const HARVEST_TOKEN_ENTRY = path.join(REPO_ROOT, 'testo', 'src', 'crawler', 'harvest-token.mjs');
 const PW_CONFIG = path.join(REPO_ROOT, 'tests', 'playwright.config.mjs');
@@ -211,6 +223,10 @@ async function cmdScan(opts) {
 
   const stages = [];
   if (!opts.reuse) {
+    // A scan is the pre-testing baseline: drop any prior run's coverage so the
+    // gap-analyzer reports every endpoint as untested. `ctx execute` re-writes
+    // coverage and re-derives gaps to show what testing closed.
+    fs.rmSync(path.join(OUT, 'coverage', 'covered-endpoints.json'), { force: true });
     const env = skillModeEnv({
       ...(opts.url ? { BASE_URL: opts.url } : {}),
       ...(opts.codebase ? { TARGET_CODEBASE: path.resolve(opts.codebase) } : {}),
@@ -220,6 +236,23 @@ async function cmdScan(opts) {
     stages.push({ id: 'content-extractor', ok: extractCode === 0, exitCode: extractCode });
     const indexCode = await runNode(INDEX_ENTRY, env, 'indexer');
     stages.push({ id: 'indexer', ok: indexCode === 0, exitCode: indexCode });
+
+    // Knowledge stages — synthesize facts, then derive gaps + features. These
+    // are NON-FATAL (`critical: false`): a hiccup here still leaves a usable
+    // indexed scan, so it must not fail the whole run or block classification.
+    // They run only when indexing produced something to synthesize.
+    if (indexCode === 0) {
+      for (const [id, entry] of [
+        ['knowledge-synthesizer', SYNTH_ENTRY],
+        ['gap-analyzer', GAP_ENTRY],
+        ['feature-extractor', FEATURE_ENTRY],
+        ['feature-slice', FEATURE_SLICE_ENTRY],
+      ]) {
+        const code = await runNode(entry, env, id);
+        if (code !== 0) log(`[ctx] ⚠ ${id} exit ${code} (non-fatal — scan still usable)`);
+        stages.push({ id, ok: code === 0, exitCode: code, critical: false });
+      }
+    }
   } else {
     log('[ctx] --reuse: skipping the pipeline, reading existing output/');
   }
@@ -231,18 +264,26 @@ async function cmdScan(opts) {
   const delegation = writeIntentDelegation(runId);
 
   const topics = idxIndex.topics || {};
+  // Knowledge-stage artifacts (present when those stages ran + succeeded).
+  const featuresIdx = readJson(path.join(OUT, 'features', 'features.json'));
+  const gapsIdx = readJson(path.join(OUT, 'gaps', 'gaps.json'));
   const counts = {
     apis: topics.apis?.count ?? 0,
     pages: topics.pages?.count ?? 0,
     clickEdges: topics['click-graph']?.count ?? 0,
     intentsAnnotated: crawler?.stats?.intentsAnnotated ?? 0,
+    features: featuresIdx?.stats?.featureCount ?? 0,
+    gaps: gapsIdx?.stats?.totalGaps ?? 0,
+    highSeverityGaps: gapsIdx?.stats?.bySeverity?.high ?? 0,
   };
   const authRequired = detectLoginWall(crawler, opts.url);
   if (authRequired) {
     log(`[ctx] ⚠ login wall: ${authRequired.reason}`);
     log(`[ctx]   fix: ${authRequired.loginCommand}`);
   }
-  const stagesOk = stages.every((s) => s.ok);
+  // Only CRITICAL stages gate the run's ok. Knowledge stages are best-effort:
+  // a failure there is logged but leaves the indexed scan fully usable.
+  const stagesOk = stages.every((s) => s.ok || s.critical === false);
   const summary = {
     run_id: runId,
     mode: 'skill',
@@ -253,7 +294,15 @@ async function cmdScan(opts) {
     counts,
     authRequired: authRequired || null,
     delegations: delegation ? [delegation] : [],
-    consumable: { index: 'output/indexed_output/index.json', topics_dir: 'output/indexed_output/' },
+    consumable: {
+      index: 'output/indexed_output/index.json',
+      topics_dir: 'output/indexed_output/',
+      // Knowledge layer — null until those stages have produced them.
+      facts: fs.existsSync(path.join(OUT, 'synthesized', 'facts.json')) ? 'output/synthesized/facts.json' : null,
+      gaps: gapsIdx ? 'output/gaps/gaps.json' : null,
+      features: featuresIdx ? 'output/features/features.json' : null,
+      featureManifest: fs.existsSync(path.join(OUT, 'features', 'feature-manifest.json')) ? 'output/features/feature-manifest.json' : null,
+    },
     log: LOG_FILE ? path.relative(REPO_ROOT, LOG_FILE) : null,
   };
   fs.writeFileSync(path.join(OUT, 'run-summary.json'), JSON.stringify(summary, null, 2));
@@ -357,6 +406,19 @@ async function cmdAnnotateIntents(opts) {
   // re-index so click-graph reflects the host's intents
   const idxCode = await runNode(INDEX_ENTRY, process.env, 'indexer');
 
+  // Refresh the knowledge layer so features/gaps reflect the classified intents
+  // (host-annotated interactions feed the synthesizer's interaction-graph fact,
+  // which drives feature clustering). Best-effort — never fails the write-back.
+  let knowledgeRefreshed = false;
+  if (idxCode === 0) {
+    let kc = 0;
+    for (const [id, entry] of [['knowledge-synthesizer', SYNTH_ENTRY], ['gap-analyzer', GAP_ENTRY], ['feature-extractor', FEATURE_ENTRY], ['feature-slice', FEATURE_SLICE_ENTRY]]) {
+      const c = await runNode(entry, process.env, id);
+      if (c !== 0) { log(`[ctx] ⚠ ${id} exit ${c} (non-fatal)`); kc = c; }
+    }
+    knowledgeRefreshed = kc === 0;
+  }
+
   const ok = idxCode === 0 && merged > 0;
   emit({
     ok,
@@ -364,6 +426,7 @@ async function cmdAnnotateIntents(opts) {
     tool: 'annotate-intents',
     counts: { merged, rejectedMalformed: rejectedShape, rejectedUnknownId, intentsAnnotated: count },
     reindexed: idxCode === 0,
+    knowledgeRefreshed,
     delegation: { kind: 'crawler-intent', pending: false },
     log: LOG_FILE ? path.relative(REPO_ROOT, LOG_FILE) : null,
   });
@@ -459,6 +522,26 @@ function runPlaywright(mode, baseUrl) {
 // Reads both suites' results.json and produces output/generation/report.{json,md}
 // listing EVERY test — passed, failed, and skipped (with reason). This is the
 // single artifact the user reviews after a run.
+// ── gaps-loop helpers ────────────────────────────────────────────────────────
+// Coverage = endpoints with a PASSING API test this run. Written as the
+// gap-analyzer's coverage input ("<METHOD> <pathTemplate>" strings, from the
+// templated api_id), so a re-run drops their untested-endpoint gaps.
+function writeCoverage(apiRes) {
+  const covered = new Set();
+  for (const t of (apiRes?.tests || [])) {
+    if (t.ok && t.api_id) covered.add(String(t.api_id).replace(/^([A-Z]+):/, '$1 '));
+  }
+  const dir = path.join(OUT, 'coverage');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'covered-endpoints.json'), JSON.stringify([...covered].sort(), null, 2));
+  return covered.size;
+}
+
+function readGapCount(type) {
+  const g = readJson(path.join(OUT, 'gaps', 'gaps.json'));
+  return g?.stats?.byType?.[type] ?? 0;
+}
+
 function collectApiTests(res) {
   if (!res) return [];
   const out = [];
@@ -495,8 +578,14 @@ function collectUiTests(res) {
   return out;
 }
 
-function buildUnifiedReport({ mode, apiRes, uiRes, runId }) {
+function buildUnifiedReport({ mode, apiRes, uiRes, runId, baseUrl }) {
   const rows = [...collectApiTests(apiRes), ...collectUiTests(uiRes)];
+  // Feature dimension (Phase 3): tag each row with its featureId via the
+  // manifest, then roll up per-feature tallies + coverage. Absent manifest →
+  // rows stay untagged and `features` is empty; the flat report is unchanged.
+  const manifest = loadFeatureManifest();
+  tagRows(rows, manifest);
+  const features = summarizeFeatures(rows, manifest);
   const tally = (suite) => {
     const r = rows.filter((x) => !suite || x.suite === suite);
     return {
@@ -509,9 +598,11 @@ function buildUnifiedReport({ mode, apiRes, uiRes, runId }) {
   const summary = {
     generatedAt: new Date().toISOString(),
     runId, mode,
+    target: baseUrl ? { baseUrl } : null,
     totals: tally(null),
     api: tally('api'),
     ui: tally('ui'),
+    features,
     tests: rows,
   };
   fs.mkdirSync(GEN_DIR, { recursive: true });
@@ -528,15 +619,26 @@ function buildUnifiedReport({ mode, apiRes, uiRes, runId }) {
   md.push(`| API: ${summary.api.passed}/${summary.api.total} passed (${summary.api.skipped} skipped) | UI: ${summary.ui.passed}/${summary.ui.total} passed (${summary.ui.skipped} skipped) |`);
   md.push('|---|---|');
   md.push('');
+  // Feature-slice rollup — one row per feature, ordered by gap priority.
+  if (features.length) {
+    md.push('## Coverage by feature');
+    md.push('');
+    md.push('| Feature | Passed | Failed | Skipped | Open gaps | High-sev |');
+    md.push('|---|---|---|---|---|---|');
+    for (const f of features) {
+      md.push(`| ${f.name} (\`${f.featureId}\`) | ${f.passed} | ${f.failed} | ${f.skipped} | ${f.priority.openGaps ?? f.gapCount ?? 0} | ${f.priority.highSeverityGaps ?? 0} |`);
+    }
+    md.push('');
+  }
   for (const suite of ['api', 'ui']) {
     const r = rows.filter((x) => x.suite === suite);
     if (!r.length) continue;
     md.push(`## ${suite.toUpperCase()} tests (${r.length})`);
     md.push('');
-    md.push('| | Test | Status | Detail / Reason |');
-    md.push('|---|---|---|---|');
+    md.push('| | Test | Feature | Status | Detail / Reason |');
+    md.push('|---|---|---|---|---|');
     for (const x of r) {
-      md.push(`| ${icon(x.status)} | ${x.name} | ${x.status} | ${x.reason || x.detail || ''} |`);
+      md.push(`| ${icon(x.status)} | ${x.name} | ${x.featureId || '—'} | ${x.status} | ${x.reason || x.detail || ''} |`);
     }
     md.push('');
   }
@@ -597,11 +699,40 @@ async function cmdExecute(opts) {
   await runE2eGen(mode, opts.url);
   const e2eRunCode = await runPlaywright(mode, opts.url);
 
-  // ── unified report over BOTH suites ───────────────────────────────────────
   const apiRes = readJson(API_RESULTS);
   const uiRes = readJson(E2E_RESULTS);
-  const report = buildUnifiedReport({ mode, apiRes, uiRes, runId });
+
+  // ── close the gaps loop ───────────────────────────────────────────────────
+  // Record the endpoints this run actually PASSED as coverage, then re-derive
+  // gaps/features so the report reflects the "untested-endpoint" gaps this run
+  // closed. Best-effort — a hiccup here just leaves the pre-run gap numbers.
+  let gapsClosed = 0;
+  const untestedBefore = readGapCount('untested-endpoint');
+  const coveredN = writeCoverage(apiRes);
+  if (coveredN) {
+    log(`[coverage] ${coveredN} endpoint(s) passed → output/coverage/covered-endpoints.json; re-deriving gaps + features`);
+    for (const [id, entry] of [['gap-analyzer', GAP_ENTRY], ['feature-extractor', FEATURE_ENTRY], ['feature-slice', FEATURE_SLICE_ENTRY]]) {
+      const c = await runNode(entry, process.env, id);
+      if (c !== 0) log(`[coverage] ⚠ ${id} exit ${c} (non-fatal)`);
+    }
+    const untestedAfter = readGapCount('untested-endpoint');
+    gapsClosed = Math.max(0, untestedBefore - untestedAfter);
+    log(`[coverage] untested-endpoint gaps: ${untestedBefore} → ${untestedAfter} (${gapsClosed} closed)`);
+  }
+
+  // ── unified report over BOTH suites (reads the coverage-updated manifest) ──
+  const report = buildUnifiedReport({ mode, apiRes, uiRes, runId, baseUrl: opts.url });
   log(`[report] ${report.totals.total} tests — ${report.totals.passed} passed, ${report.totals.failed} failed, ${report.totals.skipped} skipped → output/generation/report.md`);
+
+  // ── feature-grouped PDF (best-effort; needs the feature manifest from scan) ──
+  let reportPdf = null;
+  try {
+    const pdf = await buildFeaturePdf({});
+    reportPdf = pdf.pdf;
+    log(`[report] feature PDF → ${pdf.pdf} (${(pdf.bytes / 1024).toFixed(0)} KB, ${pdf.features} features)`);
+  } catch (e) {
+    log(`[report] ⚠ feature PDF skipped: ${e.message}`);
+  }
 
   // ok = API skill ok AND no UI test unexpectedly failed. Skips never fail the run.
   const ok = code === 0 && !!r.ok && report.totals.failed === 0;
@@ -616,8 +747,10 @@ async function cmdExecute(opts) {
       ui: report.ui,
     },
     loginOk: r.login_succeeded ?? false,
+    gapsClosed,
     report: 'output/generation/report.md',
     reportJson: 'output/generation/report.json',
+    reportPdf,
     suites: {
       api: 'output/generation/api-tests/results.json',
       ui: 'output/generation/e2e/results.json',
