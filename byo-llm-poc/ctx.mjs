@@ -24,6 +24,7 @@ const OUT = path.join(REPO_ROOT, 'output');
 const RUN_ENTRY = path.join(REPO_ROOT, 'context-layer', 'content-extractor', 'run.mjs');
 const INDEX_ENTRY = path.join(REPO_ROOT, 'testo', 'src', 'indexer', 'index.mjs');   // spec-16: indexer moved to testo
 const E2E_GEN_ENTRY = path.join(REPO_ROOT, 'testo', 'src', 'crawler', 'generator', 'e2e.mjs');
+const HARVEST_TOKEN_ENTRY = path.join(REPO_ROOT, 'testo', 'src', 'crawler', 'harvest-token.mjs');
 const PW_CONFIG = path.join(REPO_ROOT, 'tests', 'playwright.config.mjs');
 const PW_BIN = path.join(REPO_ROOT, 'node_modules', '.bin', 'playwright');
 const GEN_DIR = path.join(OUT, 'generation');
@@ -418,6 +419,17 @@ function runSkill(kv, label) {
   });
 }
 
+// ── bearer harvest: capture a live token from the authenticated session ──────
+// OIDC/Firebase backends mint their token in-browser, so neither a raw curl nor
+// a Playwright request context carries it → 401. This drives the saved session
+// once and writes output/crawler/auth-token.json, which BOTH suites read to
+// authenticate. Best-effort: on failure the suites just run unauthenticated.
+function runHarvestToken(baseUrl) {
+  const env = { ...process.env };
+  if (baseUrl) env.BASE_URL = baseUrl;
+  return runNode(HARVEST_TOKEN_ENTRY, env, 'harvest-token');
+}
+
 // ── UI test generation + execution (Playwright) ──────────────────────────────
 // The UI half of the hybrid. e2e.mjs writes specs from the crawler's
 // click-graph + routes (codebase optional); Playwright runs them authenticated
@@ -570,6 +582,10 @@ async function cmdExecute(opts) {
   const mode = normMode(opts.mode);
   openLog(runId);
   log(`[ctx] execute — mode=${mode} (safe: read-only executed, mutations skipped; full: all except catastrophic)`);
+
+  // ── auth: harvest a live bearer BEFORE either suite runs (best-effort) ────
+  const harvestCode = await runHarvestToken(opts.url);
+  if (harvestCode !== 0) log('[ctx] no bearer harvested — authenticated API tests may 401 (unauthenticated fallback)');
 
   // ── API suite: generate + run ────────────────────────────────────────────
   const { code, result } = await runSkill(

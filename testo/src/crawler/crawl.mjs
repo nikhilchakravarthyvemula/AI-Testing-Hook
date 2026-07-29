@@ -939,6 +939,22 @@ if (CRAWL_DISABLED) {
     serializeAuth: !!authState,
     onAuthWarmed: async (fresh) => {
       if (!fresh) return;
+      // The pool captures the discovery/warm-up context UNCONDITIONALLY — even
+      // when that context never authenticated (it bounced to /login and only
+      // collected IdP iframe cookies). Adopting such a capture clobbers a good
+      // session-bearing auth-state with an empty shell: IndexedDB dbs exist but
+      // hold ZERO records (Firebase keeps the signed-in user as a record in
+      // firebaseLocalStorageDb), and every later run bounces straight back to
+      // /login. Guard: never replace state that has storage-side session
+      // material with a capture that has none.
+      const sessionMaterial = (st) => (st?.origins || []).reduce((n, o) =>
+        n + (o.localStorage?.length || 0) +
+        (o.indexedDB || []).reduce((m, db) =>
+          m + (db.stores || []).reduce((k, s) => k + (s.records?.length || 0), 0), 0), 0);
+      if (sessionMaterial(fresh) === 0 && sessionMaterial(authState) > 0) {
+        console.warn('[auth] warm-up capture carries no session material (0 localStorage/IndexedDB records) — keeping the existing auth-state.json');
+        return;
+      }
       authState = fresh;                                  // fan-out workers now inject the LIVE token
       try {
         fs.writeFileSync(AUTH_STATE, JSON.stringify(fresh));   // persist the rotated session for next run

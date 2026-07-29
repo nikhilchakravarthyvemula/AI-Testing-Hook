@@ -39,7 +39,15 @@ export default defineConfig({
   testDir: path.join(__dirname, 'e2e'),
   timeout: 45_000,
   retries: 0,
-  workers: 2,                      // gentle on staging; the crawler auth is shared
+  // Serial by design. SSO/OIDC apps mint a SINGLE-USE refresh token: two
+  // contexts cold-loading the same saved session at once both try a silent
+  // refresh, the first rotates the token server-side, and the second is
+  // rejected → bounced to /login (its nav buttons never appear, so flow steps
+  // time out). The crawler avoids this by serializing recovery; we do the same
+  // — one worker, no parallel refresh race. API/auth specs are quick, so the
+  // wall-clock cost is small.
+  fullyParallel: false,
+  workers: 1,
   reporter: [
     ['list'],
     ['json', { outputFile: path.join(REPORT_DIR, 'results.json') }],

@@ -5,7 +5,12 @@
 // sessions restore too). If the app still bounces to /login (expired
 // session), we retry with the crawler's deterministic SSO driver; it stops
 // cleanly at MFA/popup instead of hanging.
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { attemptSsoLogin } from '../../testo/src/crawler/auth/sso.mjs';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const AUTH_STATE = path.resolve(__dirname, '..', '..', 'output', 'crawler', 'auth-state.json');
 
 const LOGIN_URL_RE = /\/(login|signin|sign-in|auth)\b/i;
 const LOGIN_EMAIL = process.env.LOGIN_EMAIL || '';
@@ -24,6 +29,40 @@ export async function login(page) {
     `login helper: still on ${page.url()} (sso: ${sso.reason}). ` +
     `Saved session likely expired — re-run: node testo/src/crawler/login-once.mjs`,
   );
+}
+
+// Non-throwing session guard for the flow specs. The pre-seeded storageState
+// normally authenticates, but SSO/OIDC apps re-check on a cold context load and
+// can bounce to /login (their session refresh is single-use). Recover this
+// context in place, then re-navigate the route the flow intended. This is safe
+// to call unconditionally at the top of a flow; it's a no-op when the session
+// held. Serialized by playwright.config's workers:1 — no parallel refresh race.
+// Returns true when we end up on an app (non-login) page.
+export async function ensureAuthed(page, intendedPath) {
+  await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {});
+  if (!LOGIN_URL_RE.test(page.url())) return true;
+
+  const isDone = (u) => !LOGIN_URL_RE.test(u);
+  await attemptSsoLogin(page, {
+    email: LOGIN_EMAIL, password: LOGIN_PASSWORD, isDone, log: console,
+  }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {});
+
+  const recovered = !LOGIN_URL_RE.test(page.url());
+  if (recovered) {
+    // Propagate the freshly-rotated session to the shared storageState so the
+    // NEXT serialized spec starts authenticated instead of bouncing + re-doing
+    // this ~20s SSO round-trip (the crawler's warm-up-and-propagate pattern).
+    // Safe because playwright.config runs workers:1 — no concurrent writer.
+    await page.context().storageState({ path: AUTH_STATE, indexedDB: true }).catch(() => {});
+  }
+
+  // attemptSsoLogin lands on the app's default page; return to the flow's start.
+  if (intendedPath && recovered) {
+    await page.goto(intendedPath).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {});
+  }
+  return !LOGIN_URL_RE.test(page.url());
 }
 
 // Locate a field by the metadata the crawler captured (name/id/placeholder/

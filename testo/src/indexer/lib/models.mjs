@@ -12,9 +12,9 @@
 // dump. Tier→confidence lives in knowledge-base/schema.mjs — the single source
 // of truth — not here.
 
-import { confidenceForTier, ALL_TIERS, contentHashOf } from '../../../knowledge-base/schema.mjs';
+import { confidenceForTier, ALL_TIERS, contentHashOf } from '../../../../knowledge-base/schema.mjs';
 
-/** @typedef {import('../../../knowledge-base/schema.mjs').DiscoveryTier} DiscoveryTier */
+/** @typedef {import('../../../../knowledge-base/schema.mjs').DiscoveryTier} DiscoveryTier */
 
 /**
  * @typedef {"agreed"|"single-source"|"conflicting"} ConsensusKind

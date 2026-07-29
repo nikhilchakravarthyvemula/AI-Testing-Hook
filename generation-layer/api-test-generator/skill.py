@@ -210,7 +210,22 @@ class ApiTestGeneratorSkill:
         token: Optional[str] = None
         token_type = args.auth_scheme
 
-        if login_item and args.login_email and args.login_password:
+        # Prefer a bearer harvested from a live authenticated browser session
+        # (output/crawler/auth-token.json, written by harvest-token.mjs). OIDC /
+        # Firebase backends mint their token in-browser — there is no
+        # credential-POST login endpoint that returns one — so this is the only
+        # way their authenticated endpoints get anything but a 401.
+        harvested = _load_harvested_token(repo_root)
+        if harvested:
+            token = harvested["token"]
+            token_type = harvested.get("scheme") or args.auth_scheme
+            print(
+                f"[api-test-generator] using harvested bearer "
+                f"({token_type} {token[:12]}… from {harvested.get('origin')})",
+                flush=True,
+            )
+
+        if not token and login_item and args.login_email and args.login_password:
             login_base = _origin_for(login_item) or fallback_base_url
             login_path = login_item["primary"]["path"]
             print(
@@ -246,11 +261,22 @@ class ApiTestGeneratorSkill:
                 print(f"[api-test-generator] login OK — token captured ({token_type} {(token or '')[:12]}…)", flush=True)
             else:
                 print(f"[api-test-generator] login FAILED: {login_result.error}", flush=True)
-        else:
+        elif not token:
             reason = "no login endpoint found" if not login_item else "no credentials provided"
             print(f"[api-test-generator] skipping login: {reason}", flush=True)
 
         login_summary = _build_login_summary(login_item, login_result)
+        if harvested and not login_result:
+            login_summary = {
+                "attempted": True,
+                "login_url": harvested.get("sampleUrl"),
+                "ok": True,
+                "response_status": None,
+                "error": None,
+                "token_type": token_type,
+                "token_preview": (token or "")[:12] + "…" if token else None,
+                "source": "harvested-browser-session",
+            }
 
         # ── step 2: build + run remaining ────────────────────────────────
         # Skip the login endpoint itself in the per-API loop (we already
@@ -357,9 +383,11 @@ class ApiTestGeneratorSkill:
 
         passed = sum(1 for t in test_results if t.ok)
         failed = len(test_results) - passed
-        # Overall skill `ok`: login (when attempted) succeeded AND every executed test passed.
-        login_attempted = login_item is not None and bool(args.login_email)
-        overall_ok = (not login_attempted or (login_result and login_result.ok)) and (failed == 0 or not args.execute)
+        # Overall skill `ok`: auth (when attempted) succeeded AND every executed test passed.
+        # A harvested bearer counts as a successful login.
+        got_auth = bool(harvested) or bool(login_result and login_result.ok)
+        login_attempted = bool(harvested) or (login_item is not None and bool(args.login_email))
+        overall_ok = (not login_attempted or got_auth) and (failed == 0 or not args.execute)
 
         return ApiTestGeneratorResult(
             ok=bool(overall_ok),
@@ -367,7 +395,7 @@ class ApiTestGeneratorSkill:
             curls_executed=len(test_results),
             passed=passed, failed=failed,
             skipped=len(skipped_items),
-            login_succeeded=bool(login_result and login_result.ok),
+            login_succeeded=got_auth,
             login_url=(login_result.login_url if login_result else None),
             output_dir=str(out_dir),
             summary_path=str(results_path),
@@ -381,6 +409,23 @@ class ApiTestGeneratorSkill:
 def _detect_repo_root() -> Path:
     # This file: <repo>/generation-layer/api-test-generator/skill.py
     return Path(__file__).resolve().parents[2]
+
+
+def _load_harvested_token(repo_root: Path) -> Optional[dict]:
+    """Read a live bearer harvested from an authenticated browser session.
+
+    Written by testo/src/crawler/harvest-token.mjs (run by `ctx execute` before
+    the suites). Returns a dict with at least {'token'} or None when absent /
+    malformed. This is the auth path for OIDC/Firebase backends whose token
+    isn't obtainable via a credential POST.
+    """
+    p = repo_root / "output" / "crawler" / "auth-token.json"
+    try:
+        data = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return None
+    tok = data.get("token") if isinstance(data, dict) else None
+    return data if isinstance(tok, str) and tok else None
 
 
 def _short_curl_error(err: str) -> str:
