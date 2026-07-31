@@ -773,6 +773,23 @@ async function recordPage(page, requestedUrl, navStatus, phase = 'crawl', extra 
 // route reached by an in-app click worked but a direct goto bounced.
 const _IDP_RE = EXTERNAL_IDP_RE;
 
+// Persist the CURRENT context's session to auth-state.json. With a single-use
+// rotating refresh token, whoever holds the newest rotation must save it — or
+// the next cold start presents an already-consumed token and burns a recovery
+// cycle (or dies). Called after every successful recovery/login. Guarded so an
+// empty capture never clobbers a good saved state.
+async function persistSession(page, say = console.log.bind(console)) {
+  try {
+    const fresh = await page.context().storageState({ indexedDB: true });
+    const material = (st) => (st?.cookies?.length || 0) +
+      (st?.origins || []).reduce((n, o) => n + (o.localStorage?.length || 0), 0);
+    if (material(fresh) === 0) return;
+    authState = fresh;
+    fs.writeFileSync(AUTH_STATE, JSON.stringify(fresh));
+    say(`[auth] re-saved rotated session → auth-state.json (${(fresh.cookies || []).length} cookies)`);
+  } catch (e) { say(`[auth] could not re-save session: ${e.message}`); }
+}
+
 async function recoverSession(page, intendedUrl, log) {
   if (!authState) return false;                    // nothing saved → can't recover, fall back to form login
   const say = (m) => (log?.info ?? console.log).call(log || console, m);
@@ -796,15 +813,40 @@ async function recoverSession(page, intendedUrl, log) {
     }
     return looksRecovered();
   };
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
-    if (await settle(22_000)) {              // generous — covers the IdP round-trip
-      say(`[auth] session recovered via silent SSO (attempt ${attempt}) → ${page.url()}`);
-      return true;
+  // URL checks alone FALSE-POSITIVE on apps whose route guard fails open: the
+  // shell renders at a real path (e.g. /graph) while every API call 401s. A
+  // "recovered" verdict then skips the maybeLogin fallback and can persist a
+  // hollow session. Watch the token-refresh endpoint during the settle — if
+  // the LAST refresh this attempt returned ≥400, the shell is not a session.
+  let refreshStatus = null;
+  const onResp = (resp) => {
+    try {
+      if (/\/(refresh|token)\b/i.test(new URL(resp.url()).pathname)) refreshStatus = resp.status();
+    } catch {}
+  };
+  page.on('response', onResp);
+  try {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      refreshStatus = null;
+      await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+      if (await settle(22_000)) {              // generous — covers the IdP round-trip
+        if (refreshStatus != null && refreshStatus >= 400) {
+          say(`[auth] at ${page.url()} but token refresh returned ${refreshStatus} — hollow shell, not a session (attempt ${attempt})`);
+          continue;
+        }
+        say(`[auth] session recovered via silent SSO (attempt ${attempt}) → ${page.url()}`);
+        // Persist the ROTATED session: this recovery just consumed the on-disk
+        // refresh token. The pool's warm-up re-save only covers multi-worker
+        // runs; this covers workers=1 (deep-crawl) and mid-task re-auth.
+        await persistSession(page, say);
+        return true;
+      }
     }
+    say(`[auth] session recovery failed after 3 attempts — still at ${page.url()}`);
+    return false;
+  } finally {
+    page.off('response', onResp);
   }
-  say(`[auth] session recovery failed after 3 attempts — still at ${page.url()}`);
-  return false;
 }
 
 // ── interactive manual-login fallback ────────────────────────────────────
@@ -983,7 +1025,7 @@ if (CRAWL_DISABLED) {
         // Serialize recovery (single-use rotating token) → wait for the silent
         // SSO to settle; only fall back to form-fill when there's no session.
         const recovered = await serializedRecover(() => recoverSession(page, `${BASE_URL}${SEED_PATH}`, console));
-        if (!recovered) await maybeLogin(page, console);
+        if (!recovered && await maybeLogin(page, console)) await persistSession(page);
         await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
       }
       // Automatic recovery failed → offer a MANUAL login (visible browser, once
@@ -1020,7 +1062,12 @@ if (CRAWL_DISABLED) {
       const recovered = authState
         ? await serializedRecover(() => recoverSession(page, intendedUrl, console))
         : false;
-      if (!recovered) await maybeLogin(page, console);
+      if (!recovered && await maybeLogin(page, console)) {
+        await persistSession(page);
+        // maybeLogin lands on the app's default page — put this worker back
+        // on the route it was actually trying to crawl.
+        if (intendedUrl) await page.goto(intendedUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
+      }
     },
 
     // Hook into the existing per-page snapshot writer (forms, links,

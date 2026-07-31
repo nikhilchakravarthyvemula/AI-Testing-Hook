@@ -194,6 +194,18 @@ export async function runWorker(opts) {
         }
       }
 
+      // Still on the login wall after re-auth → scanning would only click the
+      // IdP sign-in buttons and the task URL would be permanently marked
+      // visited without ever being seen. Requeue it ONCE (flagged) so a later
+      // pass — after this or a sibling context recovers — actually crawls it.
+      if (/\/(login|signin|sign-in|sso|auth)\b/i.test(page.url()) && !task.reauthRetried) {
+        state.interactedUrls.delete(url);
+        state.enqueue({ ...task, reauthRetried: true });
+        state.recordIssue({ type: 'requeued-login-bounce', workerId, url, message: `bounced to ${page.url()}` });
+        log(`[w${workerId}] still on login — requeued ${url} for one retry`);
+        continue;
+      }
+
       // ── scan ──────────────────────────────────────────────────────────
       // scannerFn defaults to the heuristic scanInteractables. The LLM-
       // primary walker overrides it with a scanner that asks an LLM what

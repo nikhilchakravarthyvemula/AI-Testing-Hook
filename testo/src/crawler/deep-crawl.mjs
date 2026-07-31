@@ -21,8 +21,11 @@
 //   LOGIN_*, CRAWLER_LLM, CRAWL_BUDGET_MS (pass 1).
 // Deep-specific:
 //   SKIP_PASS1=1                 reuse existing output/crawler (don't re-walk)
-//   DEEP_BUDGET_MS               pass-2 wall-clock budget (default 180000)
+//   DEEP_BUDGET_MS               pass-2 wall-clock budget (default 300000)
 //   DEEP_MAX_PAGES               pass-2 page cap (default 60)
+//   DEEP_WORKERS                 pass-2 worker contexts (default 1 — see pass 2)
+//   DEEP_MAX_CLICKS              pass-2 per-page click cap (default 5)
+//   DEEP_TABLE_WAIT_MS           pass-2 table-rows settle wait (default 10000)
 //   DEEP_OUT_DIR_NAME            pass-2 scratch dir (default 'crawler-deep')
 
 import { spawnSync } from 'node:child_process';
@@ -76,8 +79,26 @@ run('Pass 2 — deep-crawl synthesized detail pages', {
   CRAWLER_OUT_DIR_NAME: DEEP_NAME,
   SEED_PATHS: feed.join(','),               // seed exactly the detail URLs
   POST_CRAWL_URLS: '',
-  CRAWL_BUDGET_MS: String(process.env.DEEP_BUDGET_MS || 180_000),
-  MAX_PAGES: String(process.env.DEEP_MAX_PAGES || 60),
+  CRAWL_BUDGET_MS: String(process.env.DEEP_BUDGET_MS || 300_000),
+  // ONE worker context by default. The target's session is a single-use
+  // rotating refresh token: N contexts cloned from the same auth-state race
+  // on the refresh endpoint, the first rotation 401s the other N-1, and each
+  // loser burns ~75s in serialized recovery — the whole pass-2 budget goes to
+  // auth instead of crawling. One context = one refresh chain = no race.
+  CRAWL_WORKERS: process.env.DEEP_WORKERS || '1',
+  // The synthesized feed IS the complete work list — the discovery pre-pass
+  // would only re-find pass-1 sidebar routes, and eats budget doing it.
+  CRAWL_PREDISCOVERY: '0',
+  // crawl.mjs reads MAX_INTERACT_PAGES ("MAX_PAGES" is not an env it knows).
+  MAX_INTERACT_PAGES: String(process.env.DEEP_MAX_PAGES || 60),
+  // Detail pages are for DATA capture (their APIs fire on load); a small
+  // click cap keeps every synthesized URL within the pass-2 budget instead
+  // of exhaustively clicking the first page's sidebar.
+  SAFE_CLICK_MAX_PER_PAGE: String(process.env.DEEP_MAX_CLICKS || 5),
+  // The walker's default 30s table-rows wait is sized for heavy LIST pages;
+  // detail pages fire their XHRs on load, so 10s is plenty — at 30s the wait
+  // alone would eat most of the per-page budget across the whole feed.
+  CRAWL_TABLE_WAIT_MS: String(process.env.DEEP_TABLE_WAIT_MS || 10_000),
 });
 
 // ───────── Verify FIRST: which synthesized pages did pass 2 reach? ────────
@@ -92,6 +113,21 @@ for (const p of deepPages) {
   const u = p.finalUrl || p.requestedUrl || '';
   if (/auth\.|openid-connect|\/login\b|\/sso\b/i.test(u)) authRedirects++;
   for (const f of feed) if (u.includes(f.split('?')[0]) && (!f.includes('=') || u.includes(f.split('=').pop().split('&')[0]))) reached.add(f);
+}
+
+// Pass 2 recorded ZERO pages: the walker never processed a task (budget spent
+// entirely in auth setup/recovery). authRedirects can't count what was never
+// recorded, so without this gate the login-noise raw streams — captured by the
+// network listeners during the failed warm-up — would be merged into the main
+// capture below. Skip the merge outright.
+if (deepPages.length === 0) {
+  console.log(`\n━━━━━━━━━━ deep-crawl: PASS 2 CAPTURED NO PAGES ━━━━━━━━━━`);
+  console.log(`  the walker recorded 0 page visits — the crawl budget was likely spent in`);
+  console.log(`  auth setup/recovery before any synthesized URL was reached.`);
+  console.log(`  → retry with a bigger budget:  DEEP_BUDGET_MS=300000 SKIP_PASS1=1 npm run deep-crawl`);
+  console.log(`  → if it still bounces to login, refresh the session:  npm run login`);
+  console.log(`  (skipped merge — main capture left untouched; scratch dir: ${path.relative(REPO_ROOT, DEEP_DIR)})`);
+  process.exit(0);
 }
 
 // If pass 2 reached nothing and bounced to auth, the saved session expired —

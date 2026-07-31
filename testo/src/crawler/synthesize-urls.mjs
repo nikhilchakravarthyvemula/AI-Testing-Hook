@@ -107,6 +107,10 @@ function normKey(urlStr) {
 }
 const crawledKeys = new Set();
 for (const p of pages) {
+  // A visit that BOUNCED to the login page never actually saw the requested
+  // route — counting its requestedUrl as crawled would permanently exclude
+  // that URL from every future deep-crawl feed.
+  if (/\/(login|signin|sign-in|sso)\b/i.test(p.finalUrl || '')) continue;
   for (const k of [p.finalUrl, p.requestedUrl]) if (k) crawledKeys.add(normKey(k));
 }
 
