@@ -56,6 +56,13 @@ DEFAULT_EXEMPT: list[dict] = [
     {"path": r"/logout(?:[/_\-]|$)",                           "method": None},
     {"path": r"/sign[-_]?out(?:[/_\-]|$)",                     "method": None},
     {"path": r"/(?:token|session)[-_/]?revoke",                "method": None},
+    # ── Token rotation: executing an OIDC/OAuth refresh CONSUMES the single-use
+    #    refresh token and rotates the session server-side, so every test after
+    #    it 401s. These are auth infrastructure, not a testable business surface
+    #    — exempt them (any method) so full mode can't break its own run. GET
+    #    /oidc/discover and /oidc/providers stay testable (not matched here). ──
+    {"path": r"/(?:oidc|oauth2?)/(?:refresh|token)(?:[/_\-]|$)",   "method": None},
+    {"path": r"/refresh[-_]?token(?:[/_\-]|$)|/token[-_]?refresh(?:[/_\-]|$)", "method": None},
     # ── Account teardown: deletes/deactivates the acting user ──
     {"path": r"/deactivate(?:[/_\-]|$)",                       "method": None},
     {"path": r"/(?:me|account|profile)(?:[/_\-]|$)",           "method": "DELETE"},

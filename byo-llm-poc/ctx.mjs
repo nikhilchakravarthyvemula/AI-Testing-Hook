@@ -17,7 +17,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadFeatureManifest, tagRows, summarizeFeatures } from '../generation-layer/feature-slice/tag.mjs';
+import { loadFeatureManifest, tagRows, summarizeFeatures, templatizePath } from '../generation-layer/feature-slice/tag.mjs';
 import { buildFeaturePdf } from '../generation-layer/feature-slice/report-pdf.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -42,6 +42,12 @@ const PW_BIN = path.join(REPO_ROOT, 'node_modules', '.bin', 'playwright');
 const GEN_DIR = path.join(OUT, 'generation');
 const API_RESULTS = path.join(GEN_DIR, 'api-tests', 'results.json');
 const E2E_RESULTS = path.join(GEN_DIR, 'e2e', 'results.json');
+// Scenarios: the reviewable pre-execution test plan (see buildScenarios below).
+const SCENARIOS_FILE = path.join(GEN_DIR, 'scenarios.json');
+const SCENARIOS_EXEMPT = path.join(GEN_DIR, 'scenarios-exempt.json');
+const PERF_SCENARIO_FILE = path.join(GEN_DIR, 'perf-scenario.json');
+const PERF_GEN_ENTRY = path.join(REPO_ROOT, 'generation-layer', 'perf-test-generator', 'gen.mjs');
+const PERF_RESULTS = path.join(GEN_DIR, 'perf-tests', 'results.json');
 
 // safe (default): execute only read-only operations; mutating ones are
 // generated but not run. full: execute everything except the always-protected
@@ -452,7 +458,7 @@ function cmdContext(opts) {
 // there are no credential flags, so secrets never appear in argv/ps.
 const SKILL_RESULT_MARKER = '[call_skill:result] ';
 
-function runSkill(kv, label) {
+function runSkill(kv, label, envExtra = {}) {
   const py = path.join(REPO_ROOT, 'context-layer', 'content-extractor', '_lib', '.venv', 'bin', 'python');
   const call = path.join(REPO_ROOT, 'testo', 'skill-register', 'bin', 'call_skill.py');
   const argv = [call, 'api-test-generator', '--mode', 'direct', '--json'];
@@ -461,7 +467,7 @@ function runSkill(kv, label) {
   }
   return new Promise((resolve) => {
     log(`[ctx] → ${label} (deterministic; no LLM)`);
-    const child = spawn(py, argv, { cwd: REPO_ROOT, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(py, argv, { cwd: REPO_ROOT, env: { ...process.env, ...envExtra }, stdio: ['ignore', 'pipe', 'pipe'] });
     let result = null;
     let buf = '';
     child.stdout.on('data', (d) => {
@@ -503,13 +509,17 @@ function runE2eGen(mode, baseUrl) {
   return runNode(E2E_GEN_ENTRY, env, 'e2e-gen');
 }
 
-function runPlaywright(mode, baseUrl) {
+function runPlaywright(mode, baseUrl, specFiles = null) {
   const env = { ...process.env, TEST_MODE: mode };
   if (baseUrl) env.BASE_URL = baseUrl;
   return new Promise((resolve) => {
     if (!fs.existsSync(PW_BIN)) { log('[ctx] ✗ playwright not installed at node_modules/.bin/playwright'); return resolve(1); }
-    log(`[ctx] → e2e-run (playwright, mode=${mode})`);
-    const child = spawn(PW_BIN, ['test', '--config', PW_CONFIG], { cwd: REPO_ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    // specFiles null → run everything (current behavior). A list → run ONLY
+    // those specs (scenarios.json with some UI entries disabled).
+    const args = ['test', '--config', PW_CONFIG];
+    if (Array.isArray(specFiles)) args.push(...specFiles);
+    log(`[ctx] → e2e-run (playwright, mode=${mode}${Array.isArray(specFiles) ? `, ${specFiles.length} spec file(s) from scenarios.json` : ''})`);
+    const child = spawn(PW_BIN, args, { cwd: REPO_ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.on('data', (d) => log('  [e2e-run] ' + d.toString().replace(/\n$/, '')));
     child.stderr.on('data', (d) => log('  [e2e-run] ' + d.toString().replace(/\n$/, '')));
     child.on('error', (e) => { log(`[ctx] ✗ e2e-run spawn error: ${e.message}`); resolve(1); });
@@ -578,8 +588,227 @@ function collectUiTests(res) {
   return out;
 }
 
-function buildUnifiedReport({ mode, apiRes, uiRes, runId, baseUrl }) {
-  const rows = [...collectApiTests(apiRes), ...collectUiTests(uiRes)];
+// ── scenarios: the reviewable pre-execution test plan ────────────────────────
+// `scenarios.json` lists EVERY test the pipeline will run — API, UI, and perf —
+// with its data and an `enabled` flag the user can flip before `ctx execute`:
+//   api  → disabled entries become exemptions for the generator (run as skipped)
+//   ui   → disabled spec files are excluded from the Playwright run
+//   perf → default-DISABLED (load against a live target is opt-in); enabled
+//          entries become JMeter samplers via the perf-test-generator
+// Rebuilds PRESERVE the user's `enabled` toggles by scenario id.
+const READ_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+function curlScriptFor(method, apiPath) {
+  const slug = apiPath.replace(/[{}]/g, '').split('/').filter(Boolean).join('_');
+  const rel = path.join('output', 'generation', 'api-tests', 'curls', `${method}_${slug}.sh`);
+  return fs.existsSync(path.join(REPO_ROOT, rel)) ? rel : null;
+}
+
+function specTitle(absFile) {
+  try {
+    const m = /test\(\s*['"`]([^'"`]+)/.exec(fs.readFileSync(absFile, 'utf8'));
+    return m ? m[1] : path.basename(absFile);
+  } catch { return path.basename(absFile); }
+}
+
+function buildScenarios({ mode, baseUrl, runId }) {
+  const apisTopic = readJson(path.join(OUT, 'indexed_output', 'apis.json'));
+  const apiItems = (apisTopic?.items || []).map((it) => it.primary || it);
+
+  // Carry the user's enabled/disabled toggles across rebuilds.
+  const prev = readJson(SCENARIOS_FILE);
+  const prevEnabled = new Map();
+  for (const list of Object.values(prev?.scenarios || {})) {
+    for (const s of list || []) if (s?.id) prevEnabled.set(s.id, s.enabled !== false);
+  }
+  const keep = (id, dflt) => (prevEnabled.has(id) ? prevEnabled.get(id) : dflt);
+
+  const api = apiItems.map((p) => {
+    const method = (p.method || 'GET').toUpperCase();
+    const id = `api:${method}:${p.path}`;
+    const auth = p.observedAuth?.bearer ? 'bearer' : (p.observedAuth?.cookie ? 'cookie' : 'none');
+    const mutating = !READ_METHODS.has(method);
+    return {
+      id, enabled: keep(id, true), kind: 'api',
+      method, path: p.path, origin: p.origin || null,
+      url: p.origin ? p.origin + p.path : null,
+      auth,
+      observedStatuses: Object.keys(p.statusCounts || {}).map(Number),
+      curlScript: curlScriptFor(method, p.path),
+      note: mutating && mode === 'safe' ? 'mutating — executes only in full mode' : null,
+    };
+  });
+
+  const ui = [];
+  const e2eIndex = readJson(path.join(REPO_ROOT, 'tests', 'e2e', '_index.json')) || {};
+  for (const [category, meta] of Object.entries(e2eIndex.categories || {})) {
+    const dir = path.join(REPO_ROOT, meta.dir || `tests/e2e/${category}/`);
+    if (!fs.existsSync(dir)) continue;
+    for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.spec.mjs')).sort()) {
+      const rel = path.relative(REPO_ROOT, path.join(dir, f));
+      const id = `ui:${category}:${f.replace(/\.spec\.mjs$/, '')}`;
+      ui.push({ id, enabled: keep(id, true), kind: 'ui', category, spec: rel, title: specTitle(path.join(dir, f)) });
+    }
+  }
+
+  // Perf candidates: every observed GET (reads are load-testable without side
+  // effects). ALWAYS default-disabled — enabling load against a target is a
+  // human decision made by editing this file.
+  const perf = apiItems
+    .filter((p) => (p.method || 'GET').toUpperCase() === 'GET' && !/\/(oidc|login|logout|auth)\b/i.test(p.path))
+    .map((p) => {
+      const id = `perf:GET:${p.path}`;
+      return { id, enabled: keep(id, false), kind: 'perf', method: 'GET', path: p.path, auth: !!p.observedAuth?.bearer };
+    });
+
+  // Feature tagging — same join the unified report uses.
+  const manifest = loadFeatureManifest();
+  if (manifest) {
+    const rows = [
+      ...api.map((s) => ({ suite: 'api', name: `${s.method} ${s.url || s.path}`, _s: s })),
+      ...ui.map((s) => ({ suite: 'ui', name: s.title, _s: s })),
+    ];
+    tagRows(rows, manifest);
+    for (const r of rows) if (r.featureId) r._s.feature = r.featureId;
+  }
+
+  const scen = {
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    runId, mode,
+    target: baseUrl ? { baseUrl } : (prev?.target ?? null),
+    perfProfile: prev?.perfProfile || { vus: 5, rampUpS: 5, durationS: 30, thresholds: { p95Ms: 2000, errorRatePct: 2 } },
+    counts: {
+      api: { total: api.length, enabled: api.filter((s) => s.enabled).length },
+      ui: { total: ui.length, enabled: ui.filter((s) => s.enabled).length },
+      perf: { total: perf.length, enabled: perf.filter((s) => s.enabled).length },
+    },
+    scenarios: { api, ui, perf },
+  };
+  fs.mkdirSync(GEN_DIR, { recursive: true });
+  fs.writeFileSync(SCENARIOS_FILE, JSON.stringify(scen, null, 2));
+  return scen;
+}
+
+// Disabled API scenarios → an exemptions file the generator honors (they run as
+// "skipped/exempt", staying visible in the report). Merges the repo's own
+// api-test-exemptions.json so user-maintained rules are never lost.
+function writeScenarioExemptions(disabledApi) {
+  const repoFile = path.join(REPO_ROOT, 'api-test-exemptions.json');
+  const repoRules = readJson(repoFile)?.exempt || readJson(repoFile)?.exemptions || [];
+  const esc = (s) => s.replace(/[.*+?^$()[\]\\|]/g, '\\$&').replace(/[{}]/g, '\\$&');
+  const rules = disabledApi.map((s) => ({ method: s.method, path: `^${esc(s.path)}$` }));
+  fs.writeFileSync(SCENARIOS_EXEMPT, JSON.stringify({ exempt: [...repoRules, ...rules] }, null, 2));
+  return SCENARIOS_EXEMPT;
+}
+
+// Enabled perf scenarios → perf-test-generator input → JMeter plan (+ optional
+// headless run with --perf-run when jmeter is on PATH). Token comes from the
+// harvested bearer so authenticated samplers work.
+function runPerfSuite(scen, opts, runId) {
+  const enabled = (scen.scenarios.perf || []).filter((s) => s.enabled);
+  if (!enabled.length) return Promise.resolve(null);
+  const input = {
+    name: `ctx-perf-${runId}`,
+    baseUrl: scen.target?.baseUrl || opts.url || null,
+    perf: {
+      httpFlow: enabled.map((s) => ({ method: s.method, path: s.path, auth: s.auth })),
+      jmeter: scen.perfProfile,
+    },
+  };
+  fs.writeFileSync(PERF_SCENARIO_FILE, JSON.stringify(input, null, 2));
+  const token = readJson(path.join(OUT, 'crawler', 'auth-token.json'))?.token || '';
+  const args = [PERF_GEN_ENTRY, PERF_SCENARIO_FILE];
+  if (opts.perfRun) args.push('--run');
+  if (input.baseUrl) args.push('--url', input.baseUrl);
+  return new Promise((resolve) => {
+    log(`[ctx] → perf (${enabled.length} sampler(s)${opts.perfRun ? ', executing via jmeter' : ', plan only — add --perf-run to execute'})`);
+    const child = spawn(process.execPath, args, {
+      cwd: REPO_ROOT, env: { ...process.env, PERF_TOKEN: token }, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    child.stdout.on('data', (d) => log('  [perf] ' + d.toString().replace(/\n$/, '')));
+    child.stderr.on('data', (d) => log('  [perf] ' + d.toString().replace(/\n$/, '')));
+    child.on('error', (e) => { log(`[ctx] ✗ perf spawn error: ${e.message}`); resolve(1); });
+    child.on('exit', (code) => resolve(code ?? 1));
+  });
+}
+
+function collectPerfTests(scen) {
+  const enabled = (scen?.scenarios?.perf || []).filter((s) => s.enabled);
+  if (!enabled.length) return [];
+  const res = readJson(PERF_RESULTS);
+  if (!res) return enabled.map((s) => ({ suite: 'perf', name: `${s.method} ${s.path}`, status: 'skipped', detail: '', reason: 'perf generator did not run' }));
+  const ran = !!res.execution;
+  return enabled.map((s) => ({
+    suite: 'perf',
+    name: `${s.method} ${s.path}`,
+    status: ran ? (res.execution.ok === false ? 'failed' : 'passed') : 'skipped',
+    detail: ran ? `${res.profile?.vus ?? '?'} VUs · ${res.profile?.durationS ?? '?'}s` : 'plan.jmx generated',
+    reason: ran ? null : 'jmeter not run (use --perf-run)',
+  }));
+}
+
+// ── per-test summaries (host-LLM authored, deterministic render) ─────────────
+// The pipeline has no internal LLM, so plain-English "what this test verifies /
+// what edge case it covers" text is authored by the HOST model (same BYO-LLM
+// pattern as click-intents) and persisted to test-summaries.json, keyed by a
+// STABLE row identity (not the resolved URL, which carries volatile ids). The
+// report joins by that key so summaries survive re-runs and id rotation.
+const TEST_SUMMARIES_FILE = path.join(GEN_DIR, 'test-summaries.json');
+
+// Stable key for a report row — MUST match summaryKeyForScenario so the host
+// can author against scenarios.json and have it land on the result rows.
+//   api  → "api METHOD /templatized/path"   (real ids collapsed to {id})
+//   ui   → "ui <spec-basename>"             (row.detail is the spec file)
+//   perf → "perf METHOD /path"
+function summaryKeyForRow(row) {
+  if (row.suite === 'api') {
+    const m = /^([A-Z]+)\s+(\S+)/.exec(row.name || '');
+    if (!m) return null;
+    let p = m[2];
+    try { p = new URL(p).pathname; } catch { p = p.split('?')[0]; }
+    return `api ${m[1]} ${templatizePath(p)}`;
+  }
+  if (row.suite === 'ui') {
+    const base = (row.detail || '').replace(/\.spec\.mjs$/, '');
+    return base ? `ui ${base}` : `ui ${row.name}`;
+  }
+  if (row.suite === 'perf') {
+    const m = /^([A-Z]+)\s+(\S+)/.exec(row.name || '');
+    return m ? `perf ${m[1]} ${templatizePath(m[2].split('?')[0])}` : null;
+  }
+  return null;
+}
+
+function loadTestSummaries() {
+  const raw = readJson(TEST_SUMMARIES_FILE);
+  // Accept either { "<key>": {summary,edge} } or { summaries: {...} }.
+  return (raw && (raw.summaries || raw)) || {};
+}
+
+// Attach host-authored summary/edge to each row by stable key (no-op when the
+// file is absent — the report just omits the column).
+function attachSummaries(rows) {
+  const idx = loadTestSummaries();
+  let matched = 0;
+  for (const row of rows) {
+    const key = summaryKeyForRow(row);
+    const s = key && idx[key];
+    if (s) {
+      row.summary = typeof s === 'string' ? s : (s.summary || '');
+      row.edge = typeof s === 'string' ? '' : (s.edge || '');
+      row.summaryKey = key;
+      if (row.summary) matched++;
+    } else if (key) {
+      row.summaryKey = key;   // surfaced so an unsummarized test is easy to find
+    }
+  }
+  return matched;
+}
+
+function buildUnifiedReport({ mode, apiRes, uiRes, runId, baseUrl, extraRows = [] }) {
+  const rows = [...collectApiTests(apiRes), ...collectUiTests(uiRes), ...extraRows];
+  const summariesMatched = attachSummaries(rows);
   // Feature dimension (Phase 3): tag each row with its featureId via the
   // manifest, then roll up per-feature tallies + coverage. Absent manifest →
   // rows stay untagged and `features` is empty; the flat report is unchanged.
@@ -602,6 +831,7 @@ function buildUnifiedReport({ mode, apiRes, uiRes, runId, baseUrl }) {
     totals: tally(null),
     api: tally('api'),
     ui: tally('ui'),
+    perf: tally('perf'),
     features,
     tests: rows,
   };
@@ -630,20 +860,85 @@ function buildUnifiedReport({ mode, apiRes, uiRes, runId, baseUrl }) {
     }
     md.push('');
   }
-  for (const suite of ['api', 'ui']) {
+  const cell = (s) => String(s || '').replace(/\|/g, '\\|').replace(/\n+/g, ' ');
+  const anySummaries = rows.some((x) => x.summary);
+  for (const suite of ['api', 'ui', 'perf']) {
     const r = rows.filter((x) => x.suite === suite);
     if (!r.length) continue;
     md.push(`## ${suite.toUpperCase()} tests (${r.length})`);
     md.push('');
-    md.push('| | Test | Feature | Status | Detail / Reason |');
-    md.push('|---|---|---|---|---|');
-    for (const x of r) {
-      md.push(`| ${icon(x.status)} | ${x.name} | ${x.featureId || '—'} | ${x.status} | ${x.reason || x.detail || ''} |`);
+    if (anySummaries) {
+      // Summary-forward layout: what each test verifies (+ edge case) is the
+      // point of the column, with the raw result kept alongside.
+      md.push('| | Test | What it verifies | Edge case | Status | Result |');
+      md.push('|---|---|---|---|---|---|');
+      for (const x of r) {
+        md.push(`| ${icon(x.status)} | ${cell(x.name)} | ${cell(x.summary) || '—'} | ${cell(x.edge) || '—'} | ${x.status} | ${cell(x.reason || x.detail)} |`);
+      }
+    } else {
+      md.push('| | Test | Feature | Status | Detail / Reason |');
+      md.push('|---|---|---|---|---|');
+      for (const x of r) {
+        md.push(`| ${icon(x.status)} | ${cell(x.name)} | ${x.featureId || '—'} | ${x.status} | ${cell(x.reason || x.detail)} |`);
+      }
     }
+    md.push('');
+  }
+  if (anySummaries) {
+    const missing = rows.filter((x) => !x.summary).length;
+    md.push(`_test summaries: ${summariesMatched}/${rows.length} authored${missing ? ` · ${missing} without a summary (add to test-summaries.json)` : ''}_`);
     md.push('');
   }
   fs.writeFileSync(path.join(GEN_DIR, 'report.md'), md.join('\n'));
   return summary;
+}
+
+// Reconstruct the report rows' disabled-UI + perf extra rows from scenarios.json
+// (same as cmdExecute builds), so `ctx report` reproduces the exact row set.
+function extraRowsFromScenarios(scen) {
+  if (!scen) return [];
+  const disabledUi = (scen.scenarios?.ui || []).filter((s) => s.enabled === false);
+  return [
+    ...disabledUi.map((s) => ({ suite: 'ui', name: s.title, status: 'skipped', detail: path.basename(s.spec), reason: 'disabled in scenarios.json' })),
+    ...collectPerfTests(scen),
+  ];
+}
+
+// `ctx report` — rebuild report.{md,json} from the LAST run's results + the
+// host-authored test-summaries.json, WITHOUT re-executing. `--keys` instead
+// prints the summary worklist (every test's stable key) so the host knows what
+// to author. This is the write-back loop for per-test summaries.
+function cmdReport(opts) {
+  const scen = readJson(SCENARIOS_FILE);
+  const apiRes = readJson(API_RESULTS);
+  const uiRes = readJson(E2E_RESULTS);
+  if (!apiRes && !uiRes) return die('no results yet — run `ctx execute` first', 1);
+  const extraRows = extraRowsFromScenarios(scen);
+
+  if (opts.keys) {
+    // Worklist: the stable key + current name/status for every row, so the host
+    // authors test-summaries.json against these exact keys.
+    const rows = [...collectApiTests(apiRes), ...collectUiTests(uiRes), ...extraRows];
+    attachSummaries(rows);
+    const worklist = rows.map((r) => ({
+      key: summaryKeyForRow(r), suite: r.suite, name: r.name,
+      status: r.status, hasSummary: !!r.summary,
+    }));
+    return emit({ ok: true, tool: 'report', mode: 'keys', file: path.relative(REPO_ROOT, TEST_SUMMARIES_FILE), total: worklist.length, authored: worklist.filter((w) => w.hasSummary).length, worklist });
+  }
+
+  const runId = opts.runId || newRunId();
+  const report = buildUnifiedReport({
+    mode: scen?.mode || normMode(opts.mode), apiRes, uiRes, runId,
+    baseUrl: opts.url || scen?.target?.baseUrl || null, extraRows,
+  });
+  const authored = report.tests.filter((t) => t.summary).length;
+  emit({
+    ok: true, run_id: runId, tool: 'report',
+    counts: { total: report.totals.total, passed: report.totals.passed, failed: report.totals.failed, skipped: report.totals.skipped },
+    summaries: { authored, total: report.tests.length, file: path.relative(REPO_ROOT, TEST_SUMMARIES_FILE) },
+    report: 'output/generation/report.md', reportJson: 'output/generation/report.json',
+  });
 }
 
 async function cmdGenerate(opts) {
@@ -662,6 +957,11 @@ async function cmdGenerate(opts) {
   const e2eCode = await runE2eGen(mode, opts.url);
   const e2eIndex = readJson(path.join(REPO_ROOT, 'tests', 'e2e', '_index.json')) || {};
 
+  // Write the pre-execution test plan. The user reviews/edits enabled flags in
+  // scenarios.json before `ctx execute`; execute honors them.
+  const scen = buildScenarios({ mode, baseUrl: opts.url, runId });
+  log(`[scenarios] wrote ${path.relative(REPO_ROOT, SCENARIOS_FILE)} — api=${scen.counts.api.total} ui=${scen.counts.ui.total} perf=${scen.counts.perf.total} (perf disabled by default)`);
+
   const ok = code === 0 && !!r.ok && e2eCode === 0;
   emit({
     ok, run_id: runId, tool: 'generate', mode,
@@ -669,12 +969,34 @@ async function cmdGenerate(opts) {
       api_curls: r.curls_generated ?? 0,
       ui_specs: Object.values(e2eIndex).reduce((n, v) => n + (v?.count || 0), 0),
       ui_breakdown: e2eIndex,
+      scenarios: scen.counts,
     },
+    scenarios: path.relative(REPO_ROOT, SCENARIOS_FILE),
     output: { api: 'output/generation/api-tests/', ui: 'tests/e2e/' },
     error: r.error ?? null,
     log: LOG_FILE ? path.relative(REPO_ROOT, LOG_FILE) : null,
   });
   process.exit(ok ? 0 : 1);
+}
+
+// `ctx scenarios` — build (or with --show, just print) the pre-execution plan.
+async function cmdScenarios(opts) {
+  if (!readJson(path.join(OUT, 'indexed_output', 'apis.json')))
+    return die('no output/indexed_output/apis.json — run `ctx scan` first', 1);
+  if (opts.show) {
+    const scen = readJson(SCENARIOS_FILE);
+    if (!scen) return die('no scenarios.json yet — run `ctx scenarios` or `ctx generate` first', 1);
+    return emit({ ok: true, tool: 'scenarios', file: path.relative(REPO_ROOT, SCENARIOS_FILE), ...scen });
+  }
+  const runId = opts.runId || newRunId();
+  openLog(runId);
+  const scen = buildScenarios({ mode: normMode(opts.mode), baseUrl: opts.url, runId });
+  emit({
+    ok: true, run_id: runId, tool: 'scenarios',
+    file: path.relative(REPO_ROOT, SCENARIOS_FILE),
+    counts: scen.counts,
+    hint: 'edit "enabled" flags in scenarios.json, then run `ctx execute` — disabled api tests are skipped, disabled ui specs are not run, enabled perf entries build (and with --perf-run, execute) a JMeter plan',
+  });
 }
 
 async function cmdExecute(opts) {
@@ -685,22 +1007,59 @@ async function cmdExecute(opts) {
   openLog(runId);
   log(`[ctx] execute — mode=${mode} (safe: read-only executed, mutations skipped; full: all except catastrophic)`);
 
+  // ── scenarios: the plan of record for this run ────────────────────────────
+  // Load the reviewable plan (build it when absent or the target changed —
+  // user `enabled` toggles survive the rebuild). Everything below honors it.
+  let scen = readJson(SCENARIOS_FILE);
+  if (!scen || (opts.url && scen.target?.baseUrl && scen.target.baseUrl !== opts.url)) {
+    log(`[scenarios] ${scen ? 'target changed — rebuilding' : 'no scenarios.json — building'} the test plan`);
+    scen = buildScenarios({ mode, baseUrl: opts.url, runId });
+  }
+  const disabledApi = (scen.scenarios.api || []).filter((s) => s.enabled === false);
+  const uiScen = scen.scenarios.ui || [];
+  const disabledUi = uiScen.filter((s) => s.enabled === false);
+  const perfEnabled = (scen.scenarios.perf || []).filter((s) => s.enabled);
+  log(`[scenarios] plan: api ${scen.counts.api.total - disabledApi.length}/${scen.counts.api.total} · ui ${uiScen.length - disabledUi.length}/${uiScen.length} · perf ${perfEnabled.length}/${scen.counts.perf.total} enabled (${path.relative(REPO_ROOT, SCENARIOS_FILE)})`);
+
   // ── auth: harvest a live bearer BEFORE either suite runs (best-effort) ────
   const harvestCode = await runHarvestToken(opts.url);
   if (harvestCode !== 0) log('[ctx] no bearer harvested — authenticated API tests may 401 (unauthenticated fallback)');
 
-  // ── API suite: generate + run ────────────────────────────────────────────
+  // ── API suite: generate + run (scenario-disabled endpoints → exemptions) ──
+  const skillEnv = {};
+  if (disabledApi.length) {
+    skillEnv.API_TEST_EXEMPTIONS = writeScenarioExemptions(disabledApi);
+    log(`[scenarios] ${disabledApi.length} api scenario(s) disabled → exempted via ${path.relative(REPO_ROOT, SCENARIOS_EXEMPT)}`);
+  }
   const { code, result } = await runSkill(
-    { execute: 'true', test_mode: mode, base_url: opts.url || null, max_tests: opts.maxTests || null }, 'execute');
+    { execute: 'true', test_mode: mode, base_url: opts.url || null, max_tests: opts.maxTests || null }, 'execute', skillEnv);
   const r = result || {};
   log(`[api] ${r.curls_executed ?? 0} run — ${r.passed ?? 0} passed, ${r.failed ?? 0} failed, ${r.skipped ?? 0} skipped`);
 
   // ── UI suite: generate specs + run Playwright (authenticated via crawler session) ──
   await runE2eGen(mode, opts.url);
-  const e2eRunCode = await runPlaywright(mode, opts.url);
+  let e2eRunCode = 0;
+  if (disabledUi.length === 0) {
+    e2eRunCode = await runPlaywright(mode, opts.url);
+  } else if (uiScen.length - disabledUi.length > 0) {
+    const files = uiScen.filter((s) => s.enabled !== false && fs.existsSync(path.join(REPO_ROOT, s.spec))).map((s) => s.spec);
+    e2eRunCode = await runPlaywright(mode, opts.url, files);
+  } else {
+    log('[scenarios] every ui scenario disabled — skipping the Playwright run');
+    try { fs.rmSync(E2E_RESULTS, { force: true }); } catch { /* stale results would misreport */ }
+  }
+
+  // ── perf suite: only what the user enabled in scenarios.json ──────────────
+  await runPerfSuite(scen, opts, runId);
 
   const apiRes = readJson(API_RESULTS);
   const uiRes = readJson(E2E_RESULTS);
+
+  // Disabled UI scenarios stay visible in the report as skipped rows.
+  const extraRows = [
+    ...disabledUi.map((s) => ({ suite: 'ui', name: s.title, status: 'skipped', detail: path.basename(s.spec), reason: 'disabled in scenarios.json' })),
+    ...collectPerfTests(scen),
+  ];
 
   // ── close the gaps loop ───────────────────────────────────────────────────
   // Record the endpoints this run actually PASSED as coverage, then re-derive
@@ -720,8 +1079,8 @@ async function cmdExecute(opts) {
     log(`[coverage] untested-endpoint gaps: ${untestedBefore} → ${untestedAfter} (${gapsClosed} closed)`);
   }
 
-  // ── unified report over BOTH suites (reads the coverage-updated manifest) ──
-  const report = buildUnifiedReport({ mode, apiRes, uiRes, runId, baseUrl: opts.url });
+  // ── unified report over ALL suites (reads the coverage-updated manifest) ──
+  const report = buildUnifiedReport({ mode, apiRes, uiRes, runId, baseUrl: opts.url, extraRows });
   log(`[report] ${report.totals.total} tests — ${report.totals.passed} passed, ${report.totals.failed} failed, ${report.totals.skipped} skipped → output/generation/report.md`);
 
   // ── feature-grouped PDF (best-effort; needs the feature manifest from scan) ──
@@ -745,7 +1104,9 @@ async function cmdExecute(opts) {
       skipped: report.totals.skipped,
       api: report.api,
       ui: report.ui,
+      perf: report.perf,
     },
+    scenarios: path.relative(REPO_ROOT, SCENARIOS_FILE),
     loginOk: r.login_succeeded ?? false,
     gapsClosed,
     report: 'output/generation/report.md',
@@ -770,6 +1131,8 @@ function main() {
     case 'context': return cmdContext(opts);
     case 'annotate-intents': return cmdAnnotateIntents(opts);
     case 'generate': return cmdGenerate(opts);
+    case 'scenarios': return cmdScenarios(opts);
+    case 'report': return cmdReport(opts);
     case 'execute': return cmdExecute(opts);
     case 'help': case '-h': case '--help': case undefined: return printHelp();
     default: return die(`unknown command "${cmd}". Try: ctx help`);
@@ -789,6 +1152,9 @@ function parseArgs(argv) {
       case '--reuse': o.reuse = true; break;
       case '--max-tests': o.maxTests = parseInt(next(), 10) || 0; break;
       case '--mode': o.mode = normMode(next()); break;   // safe (default) | full
+      case '--show': o.show = true; break;               // scenarios: print, don't rebuild
+      case '--keys': o.keys = true; break;               // report: print the summary worklist
+      case '--perf-run': o.perfRun = true; break;        // execute: actually run jmeter
       case '--json': o.json = true; break;   // accepted; JSON is always the output
       default:
         if (a.startsWith('-')) return die(`unknown option "${a}"`);
@@ -816,9 +1182,22 @@ Commands:
         Merge host-produced click-intents back into the crawler bundle.
   ctx generate [--url <URL>] [--mode safe|full] [--max-tests N] [--json]
         Build BOTH suites — API curls + UI/Playwright specs — writes only, no run.
-  ctx execute [--url <URL>] [--mode safe|full] [--max-tests N] [--json]
-        Generate AND run both suites against the live target, then write a
-        unified report (output/generation/report.md) listing every test.
+        Also writes output/generation/scenarios.json: the reviewable test plan.
+  ctx scenarios [--url <URL>] [--mode safe|full] [--show] [--json]
+        Build (or --show) the pre-execution plan: every API/UI/perf test with an
+        "enabled" flag. Edit the flags, then execute honors them. Perf entries
+        are DISABLED by default; user toggles survive rebuilds.
+  ctx execute [--url <URL>] [--mode safe|full] [--max-tests N] [--perf-run] [--json]
+        Generate AND run the suites the plan enables against the live target,
+        then write a unified report (output/generation/report.md) listing every
+        test (disabled ones appear as skipped). Enabled perf scenarios emit a
+        JMeter plan; add --perf-run to execute it (needs jmeter on PATH).
+  ctx report [--keys] [--json]
+        Rebuild report.{md,json} from the last run's results + host-authored
+        output/generation/test-summaries.json (a per-test "what it verifies /
+        edge case" text), WITHOUT re-executing. --keys prints the summary
+        worklist: the stable key for every test, so the host knows what to
+        author. test-summaries.json shape: { "KEY": {"summary":"…","edge":"…"} }.
         --mode safe (default): execute read-only ops only; mutating ops are
           generated but skipped (shown in the report with a reason).
         --mode full: execute everything EXCEPT the always-protected catastrophic

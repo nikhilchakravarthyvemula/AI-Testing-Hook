@@ -113,6 +113,69 @@ if (!clickGraph || !routes) {
   process.exit(1);
 }
 
+// ── request-data sources for API specs (parity with the Python curl builder) ──
+// The generated API specs failed on three fronts the curl builder handles:
+//   1. path templates ({id}) went out un-substituted → the app 404s them,
+//   2. required query params (?email=, ?fields=) were dropped → the app 400s,
+//   3. wire-blocked mutations had zero observed statuses → toBeOneOf([]) (never
+//      passes even on a real 200).
+// These indices give the generator the same observed values the curl builder
+// uses, so a well-formed request goes out and the assertion is satisfiable.
+
+// observedPathParams (real ids the crawl saw live) — from the mock-data bundle,
+// keyed "METHOD:path" (same shape skill.py._path_params_for reads).
+const MOCK_BUNDLE = path.join(REPO_ROOT, 'output', 'mock-data', 'bundle.json');
+const pathParamIndex = (() => {
+  const idx = {};
+  const b = loadJSON(MOCK_BUNDLE);
+  for (const e of (b?.facts?.endpoints || [])) {
+    const opp = e.observedPathParams || {};
+    const picked = {};
+    for (const [name, vals] of Object.entries(opp)) {
+      if (Array.isArray(vals) && vals.length) picked[name] = String(vals[0]);
+    }
+    if (Object.keys(picked).length) idx[`${(e.method || '').toUpperCase()}:${e.path}`] = picked;
+  }
+  return idx;
+})();
+
+// exampleQuery — the actual query string the app itself sent for an endpoint,
+// mined from the raw request log. This is the ground-truth value for required
+// params (e.g. prompts/facets?fields=source_asset) we can't otherwise guess.
+// Keyed by "METHOD pathname" (templated to {id} so it matches routes' paths).
+const RAW_REQUESTS = path.join(REPO_ROOT, 'output', 'crawler', 'raw', 'requests.ndjson');
+const exampleQueryIndex = (() => {
+  const idx = {};
+  let raw = '';
+  try { raw = fs.readFileSync(RAW_REQUESTS, 'utf8'); } catch { return idx; }
+  const templatize = (p) => p.split('/').map(seg =>
+    /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(seg) || /^[0-9a-f]{16,}$/i.test(seg) || /^\d+$/.test(seg) ? '{id}' : seg
+  ).join('/');
+  for (const line of raw.split('\n')) {
+    if (!line) continue;
+    let r; try { r = JSON.parse(line); } catch { continue; }
+    let u; try { u = new URL(r.url); } catch { continue; }
+    if (!u.search) continue;
+    const key = `${(r.method || 'GET').toUpperCase()} ${templatize(u.pathname)}`;
+    if (!(key in idx)) idx[key] = u.search;   // first observed wins
+  }
+  return idx;
+})();
+
+// A satisfiable expected-status set. When the crawl observed real statuses we
+// assert on exactly those; when it observed none (wire-blocked mutation, or a
+// code-only endpoint) we fall back to a method-appropriate success family so a
+// genuine 2xx isn't recorded as a failure against an empty set.
+function expectedStatusSet(method, statusCounts) {
+  const observed = Object.keys(statusCounts || {}).map(Number).filter(n => Number.isFinite(n));
+  if (observed.length) return observed;
+  const m = method.toUpperCase();
+  if (m === 'POST')   return [200, 201, 202, 204];
+  if (m === 'DELETE') return [200, 202, 204];
+  if (m === 'PUT' || m === 'PATCH') return [200, 202, 204];
+  return [200];   // GET/HEAD/OPTIONS
+}
+
 // ============================================================
 // PART 1 — Build URL → handler index from graphify + source files
 // ============================================================
@@ -671,12 +734,33 @@ function fmtSchema(sample) {
   if (typeof sample === 'object') return { type: 'object', keys: Object.keys(sample).slice(0, 12) };
   return { type: typeof sample };
 }
+// Substitute {name}/:name path placeholders with an observed value; unmapped
+// placeholders keep the literal (rare — flagged in a comment on the spec).
+function resolvePathParams(p, params) {
+  return p.replace(/\{(\w+)\}|:(\w+)/g, (m, a, b) => {
+    const name = a || b;
+    return params[name] != null ? encodeURIComponent(params[name]) : m;
+  });
+}
 let apiWritten = 0;
 for (const e of apiEndpoints) {
   const method = e.method.toUpperCase();
-  const fullUrl = e.origin + e.path;
-  const sampleStatus = Object.entries(e.statusCounts).sort((a,b)=>b[1]-a[1])[0]?.[0] || '200';
-  const expectedStatuses = Object.keys(e.statusCounts).map(Number);
+  // Fix 1 — real path-param values (so {id} isn't sent literally → 404).
+  const pathParams = pathParamIndex[`${method}:${e.path}`] || {};
+  const resolvedPath = resolvePathParams(e.path, pathParams);
+  const unresolved = /\{(\w+)\}|:(\w+)/.test(resolvedPath);
+  // Fix 2 — append the observed query string when the endpoint required params
+  // (routes carries queryParamNames; the raw log carries the real values).
+  const needsQuery = (e.queryParamNames || []).length > 0;
+  const exampleQuery = exampleQueryIndex[`${method} ${e.path}`] || '';
+  const query = needsQuery && exampleQuery ? exampleQuery : '';
+  const fullUrl = e.origin + resolvedPath + query;
+  // Fix 3 — a satisfiable expected-status set (never toBeOneOf([])).
+  const expectedStatuses = expectedStatusSet(method, e.statusCounts);
+  const sampleStatus = Object.entries(e.statusCounts).sort((a,b)=>b[1]-a[1])[0]?.[0] || String(expectedStatuses[0]);
+  const dataCaveat = [];
+  if (unresolved) dataCaveat.push(`// NOTE: no observed value for a path param in ${e.path} — sent literally; may 404.`);
+  if (needsQuery && !exampleQuery) dataCaveat.push(`// NOTE: endpoint expects query param(s) [${e.queryParamNames.join(', ')}] but the crawl captured no example — may 400.`);
   const sampleBody = Object.values(e.exampleResponseBodiesByStatus || {})[0];
   const shape = fmtSchema(sampleBody);
   const handler = findHandler(method, e.path);
@@ -706,7 +790,7 @@ ${isMutating ? "import { skipIfSafe } from '../../helpers/mode.mjs';\n" : ''}${n
 // Generated by context-layer/content-extractor/crawler/generator/e2e.mjs from routes.json.
 ${handlerComment}
 // Observed during crawl: ${e.samples} sample(s), status counts ${JSON.stringify(e.statusCounts)}, auth: ${needsAuth ? (needsBearer ? 'bearer' : 'cookie') : 'none'}
-
+${Object.keys(pathParams).length ? `// Path params substituted from observed values: ${JSON.stringify(pathParams)}\n` : ''}${query ? `// Query string reused from an observed request: ${query}\n` : ''}${dataCaveat.length ? dataCaveat.join('\n') + '\n' : ''}
 test('API ${method} ${e.path} → ${sampleStatus}', async ({ page, context }) => {
   ${isMutating ? `skipIfSafe('${method} ${e.path}');\n  ` : ''}${needsCookie ? "await page.goto('/');\n  await login(page);\n  " : ''}const request = context.request;
   const url = ${JSON.stringify(fullUrl)};
