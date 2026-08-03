@@ -7,7 +7,7 @@
 // cleanly at MFA/popup instead of hanging.
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { attemptSsoLogin } from '../../testo/src/crawler/auth/sso.mjs';
+import { attemptSsoLogin, tryPlainFormLogin } from '../../testo/src/crawler/auth/sso.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AUTH_STATE = path.resolve(__dirname, '..', '..', 'output', 'crawler', 'auth-state.json');
@@ -19,6 +19,11 @@ const LOGIN_PASSWORD = process.env.LOGIN_PASSWORD || '';
 export async function login(page) {
   await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {});
   if (!LOGIN_URL_RE.test(page.url())) return true;   // session held — nothing to do
+
+  if (await tryPlainFormLogin(page, { email: LOGIN_EMAIL, password: LOGIN_PASSWORD })) {
+    await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {});
+    if (!LOGIN_URL_RE.test(page.url())) return true;
+  }
 
   const isDone = (u) => !LOGIN_URL_RE.test(u);
   const sso = await attemptSsoLogin(page, {
@@ -42,10 +47,13 @@ export async function ensureAuthed(page, intendedPath) {
   await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {});
   if (!LOGIN_URL_RE.test(page.url())) return true;
 
-  const isDone = (u) => !LOGIN_URL_RE.test(u);
-  await attemptSsoLogin(page, {
-    email: LOGIN_EMAIL, password: LOGIN_PASSWORD, isDone, log: console,
-  }).catch(() => {});
+  const formFilled = await tryPlainFormLogin(page, { email: LOGIN_EMAIL, password: LOGIN_PASSWORD }).catch(() => false);
+  if (!formFilled) {
+    const isDone = (u) => !LOGIN_URL_RE.test(u);
+    await attemptSsoLogin(page, {
+      email: LOGIN_EMAIL, password: LOGIN_PASSWORD, isDone, log: console,
+    }).catch(() => {});
+  }
   await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {});
 
   const recovered = !LOGIN_URL_RE.test(page.url());

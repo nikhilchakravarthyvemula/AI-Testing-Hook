@@ -158,6 +158,41 @@ async function driveIdpStep(page, idp, creds) {
   return filled ? 'filled' : 'nothing';
 }
 
+// Plain email/password form on the app's OWN login page. Some apps (forge)
+// render both a fillable form AND a "Sign in with <provider>" button on the
+// same page; callers should try this FIRST — attemptSsoLogin() below always
+// prefers the button, and for popup-based OAuth (signInWithPopup) that stalls
+// headless (COOP severs the popup→opener channel). Filling the plain form
+// sidesteps the popup entirely when it's available.
+export async function tryPlainFormLogin(page, { email, password } = {}) {
+  if (!email || !password) return false;
+  const emailLoc = page.locator("input[type='email'], input[name='email'], input[name='username']").first();
+  const pwdLoc = page.locator("input[type='password']").first();
+  // isVisible() alone doesn't poll — the form may still be rendering (async
+  // JS) when the caller lands here. Wait for either field first, the same
+  // way crawl.mjs's maybeLogin() does, before the immediate isVisible check.
+  await Promise.race([
+    emailLoc.waitFor({ state: 'visible', timeout: 4_000 }).catch(() => {}),
+    pwdLoc.waitFor({ state: 'visible', timeout: 4_000 }).catch(() => {}),
+  ]);
+  const hasEmail = await emailLoc.isVisible().catch(() => false);
+  const hasPwd = await pwdLoc.isVisible().catch(() => false);
+  if (!hasEmail || !hasPwd) return false;
+
+  await emailLoc.click({ timeout: 5_000 }).catch(() => {});
+  await emailLoc.fill('', { timeout: 5_000 }).catch(() => {});
+  await emailLoc.pressSequentially(email, { delay: 15, timeout: 8_000 }).catch(() => {});
+  await pwdLoc.click({ timeout: 5_000 }).catch(() => {});
+  await pwdLoc.fill('', { timeout: 5_000 }).catch(() => {});
+  await pwdLoc.pressSequentially(password, { delay: 15, timeout: 8_000 }).catch(() => {});
+
+  const submit = page.locator("button[type='submit'], input[type='submit']", { hasText: /sign in|log ?in/i }).first();
+  const navPromise = page.waitForNavigation({ timeout: 8_000, waitUntil: 'domcontentloaded' }).catch(() => null);
+  await submit.click({ timeout: 5_000 }).catch(() => {});
+  await navPromise;
+  return true;
+}
+
 /**
  * Click the app's "Sign in with <provider>" button (if any) and drive the
  * resulting IdP flow deterministically until `isDone(url)` is true, an MFA/

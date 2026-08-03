@@ -49,7 +49,7 @@ function buildIndex(manifest) {
 }
 
 // Derive a lookup key from a report row (see module header for the row shapes).
-function deriveKey(row) {
+export function deriveKey(row) {
   const name = row.name || '';
   if (row.suite === 'api') {
     const m = /^([A-Z]+)\s+(\S+)/.exec(name);

@@ -19,6 +19,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadFeatureManifest, tagRows, summarizeFeatures, templatizePath } from '../generation-layer/feature-slice/tag.mjs';
 import { buildFeaturePdf } from '../generation-layer/feature-slice/report-pdf.mjs';
+import { attachFailureClassification, extractUiFailureFacts } from '../generation-layer/feature-slice/classify-failure.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');      // byo-llm-poc/ sits at repo root
@@ -557,7 +558,8 @@ function collectApiTests(res) {
   const out = [];
   for (const t of res.tests || []) {
     out.push({ suite: 'api', name: `${t.method} ${t.url}`, status: t.ok ? 'passed' : 'failed',
-               detail: t.http_status != null ? `HTTP ${t.http_status}` : (t.error || ''), reason: null });
+               detail: t.http_status != null ? `HTTP ${t.http_status}` : (t.error || ''), reason: null,
+               apiId: t.api_id, actualUrl: t.url, httpStatus: t.http_status });
   }
   for (const s of res.skipped || []) {
     out.push({ suite: 'api', name: `${s.method} ${s.path}`, status: 'skipped', detail: '', reason: s.reason || 'exempt' });
@@ -576,11 +578,13 @@ function collectUiTests(res) {
       const st = result.status || test.status || 'unknown';
       const status = st === 'skipped' ? 'skipped' : (spec.ok ? 'passed' : 'failed');
       const skipAnno = (test.annotations || []).find((a) => a.type === 'skip');
-      out.push({
+      const row = {
         suite: 'ui', name: spec.title || spec.file || 'ui-test', status,
         detail: spec.file ? path.basename(spec.file) : '',
         reason: status === 'skipped' ? (skipAnno?.description || 'safe-mode') : null,
-      });
+      };
+      if (status === 'failed') Object.assign(row, extractUiFailureFacts(result));
+      out.push(row);
     }
     for (const child of suite.suites || []) visit(child);
   };
@@ -809,6 +813,9 @@ function attachSummaries(rows) {
 function buildUnifiedReport({ mode, apiRes, uiRes, runId, baseUrl, extraRows = [] }) {
   const rows = [...collectApiTests(apiRes), ...collectUiTests(uiRes), ...extraRows];
   const summariesMatched = attachSummaries(rows);
+  attachFailureClassification(rows);
+  const failureBreakdown = { 'pipeline-issue': 0, 'possible-app-bug': 0, 'expected-behavior': 0, unclassified: 0 };
+  for (const r of rows) if (r.status === 'failed') failureBreakdown[r.failureClass || 'unclassified']++;
   // Feature dimension (Phase 3): tag each row with its featureId via the
   // manifest, then roll up per-feature tallies + coverage. Absent manifest →
   // rows stay untagged and `features` is empty; the flat report is unchanged.
@@ -833,6 +840,7 @@ function buildUnifiedReport({ mode, apiRes, uiRes, runId, baseUrl, extraRows = [
     ui: tally('ui'),
     perf: tally('perf'),
     features,
+    failureBreakdown,
     tests: rows,
   };
   fs.mkdirSync(GEN_DIR, { recursive: true });
@@ -861,6 +869,15 @@ function buildUnifiedReport({ mode, apiRes, uiRes, runId, baseUrl, extraRows = [
     md.push('');
   }
   const cell = (s) => String(s || '').replace(/\|/g, '\\|').replace(/\n+/g, ' ');
+  // Machine-derived verdict, kept visually separate from host-authored prose
+  // (the "Edge case" column) so one never silently overwrites the other.
+  const classCell = (x) => {
+    if (x.status !== 'failed') return '—';
+    const cls = x.failureClass || 'unclassified';
+    const first = (x.failureReasons || [])[0] || '';
+    const flags = (x.failureFlags || []).length ? ` [${x.failureFlags.join(', ')}]` : '';
+    return `**${cls}**${flags} — ${cell(first)}`;
+  };
   const anySummaries = rows.some((x) => x.summary);
   for (const suite of ['api', 'ui', 'perf']) {
     const r = rows.filter((x) => x.suite === suite);
@@ -870,16 +887,16 @@ function buildUnifiedReport({ mode, apiRes, uiRes, runId, baseUrl, extraRows = [
     if (anySummaries) {
       // Summary-forward layout: what each test verifies (+ edge case) is the
       // point of the column, with the raw result kept alongside.
-      md.push('| | Test | What it verifies | Edge case | Status | Result |');
-      md.push('|---|---|---|---|---|---|');
+      md.push('| | Test | What it verifies | Edge case | Status | Classification | Result |');
+      md.push('|---|---|---|---|---|---|---|');
       for (const x of r) {
-        md.push(`| ${icon(x.status)} | ${cell(x.name)} | ${cell(x.summary) || '—'} | ${cell(x.edge) || '—'} | ${x.status} | ${cell(x.reason || x.detail)} |`);
+        md.push(`| ${icon(x.status)} | ${cell(x.name)} | ${cell(x.summary) || '—'} | ${cell(x.edge) || '—'} | ${x.status} | ${classCell(x)} | ${cell(x.reason || x.detail)} |`);
       }
     } else {
-      md.push('| | Test | Feature | Status | Detail / Reason |');
-      md.push('|---|---|---|---|---|');
+      md.push('| | Test | Feature | Status | Classification | Detail / Reason |');
+      md.push('|---|---|---|---|---|---|');
       for (const x of r) {
-        md.push(`| ${icon(x.status)} | ${cell(x.name)} | ${x.featureId || '—'} | ${x.status} | ${cell(x.reason || x.detail)} |`);
+        md.push(`| ${icon(x.status)} | ${cell(x.name)} | ${x.featureId || '—'} | ${x.status} | ${classCell(x)} | ${cell(x.reason || x.detail)} |`);
       }
     }
     md.push('');
@@ -887,6 +904,10 @@ function buildUnifiedReport({ mode, apiRes, uiRes, runId, baseUrl, extraRows = [
   if (anySummaries) {
     const missing = rows.filter((x) => !x.summary).length;
     md.push(`_test summaries: ${summariesMatched}/${rows.length} authored${missing ? ` · ${missing} without a summary (add to test-summaries.json)` : ''}_`);
+    md.push('');
+  }
+  if (summary.totals.failed) {
+    md.push(`_failed-test breakdown: ${failureBreakdown['pipeline-issue']} pipeline-issue · ${failureBreakdown['possible-app-bug']} possible-app-bug · ${failureBreakdown['expected-behavior']} expected-behavior · ${failureBreakdown.unclassified} unclassified_`);
     md.push('');
   }
   fs.writeFileSync(path.join(GEN_DIR, 'report.md'), md.join('\n'));
@@ -908,7 +929,7 @@ function extraRowsFromScenarios(scen) {
 // host-authored test-summaries.json, WITHOUT re-executing. `--keys` instead
 // prints the summary worklist (every test's stable key) so the host knows what
 // to author. This is the write-back loop for per-test summaries.
-function cmdReport(opts) {
+async function cmdReport(opts) {
   const scen = readJson(SCENARIOS_FILE);
   const apiRes = readJson(API_RESULTS);
   const uiRes = readJson(E2E_RESULTS);
@@ -933,11 +954,24 @@ function cmdReport(opts) {
     baseUrl: opts.url || scen?.target?.baseUrl || null, extraRows,
   });
   const authored = report.tests.filter((t) => t.summary).length;
+
+  // Best-effort — refreshes the feature-grouped PDF/HTML too, so `ctx report`
+  // alone (no re-execute) is enough after re-authoring test-summaries.json.
+  let reportPdf = null;
+  try {
+    const pdf = await buildFeaturePdf({});
+    reportPdf = pdf.pdf;
+    log(`[report] feature PDF → ${pdf.pdf} (${(pdf.bytes / 1024).toFixed(0)} KB, ${pdf.features} features)`);
+  } catch (e) {
+    log(`[report] ⚠ feature PDF skipped: ${e.message}`);
+  }
+
   emit({
     ok: true, run_id: runId, tool: 'report',
     counts: { total: report.totals.total, passed: report.totals.passed, failed: report.totals.failed, skipped: report.totals.skipped },
+    failureBreakdown: report.failureBreakdown,
     summaries: { authored, total: report.tests.length, file: path.relative(REPO_ROOT, TEST_SUMMARIES_FILE) },
-    report: 'output/generation/report.md', reportJson: 'output/generation/report.json',
+    report: 'output/generation/report.md', reportJson: 'output/generation/report.json', reportPdf,
   });
 }
 

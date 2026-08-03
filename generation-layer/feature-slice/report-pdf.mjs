@@ -53,9 +53,11 @@ function renderHtml(report, gapsByFeature) {
   const icon = (s) => (s === 'passed' ? '✓' : s === 'failed' ? '✗' : '⊘');
   const cls = (s) => (s === 'passed' ? 'pass' : s === 'failed' ? 'fail' : 'skip');
 
+  const appBugs = report.failureBreakdown?.['possible-app-bug'] ?? 0;
   const tiles = [
     tile('Passed', String(t.passed ?? 0), 'tests', 'ok'),
     tile('Failed', String(t.failed ?? 0), 'tests', (t.failed ?? 0) ? 'bad' : 'ok'),
+    tile('Possible app bugs', String(appBugs), 'worth a look', appBugs ? 'bad' : 'ok'),
     tile('Skipped', String(t.skipped ?? 0), 'safe-mode', ''),
     tile('Features', String(features.length), 'covered', ''),
     tile('Open gaps', String(totalGaps), 'to close', totalGaps ? 'warn' : 'ok'),
@@ -83,8 +85,8 @@ function renderHtml(report, gapsByFeature) {
 
     const testRows = rows.length ? `
       <h3>Tests (${rows.length})</h3>
-      <table><thead><tr><th></th><th>Test</th><th>Status</th><th>Detail / reason</th></tr></thead><tbody>
-      ${rows.map((r) => `<tr><td class="${cls(r.status)}">${icon(r.status)}</td><td class="mono">${esc(r.name)}</td><td class="${cls(r.status)}">${esc(r.status)}</td><td class="reason">${esc(r.reason || r.detail || '')}</td></tr>`).join('')}
+      <table><thead><tr><th></th><th>Test</th><th>Status</th><th>Classification</th><th>Detail / reason</th></tr></thead><tbody>
+      ${rows.map((r) => `<tr><td class="${cls(r.status)}">${icon(r.status)}</td><td class="mono">${esc(r.name)}</td><td class="${cls(r.status)}">${esc(r.status)}</td><td>${classBadge(r)}</td><td class="reason">${esc(r.reason || r.detail || '')}</td></tr>`).join('')}
       </tbody></table>` : '<p class="small">No tests were generated for this feature.</p>';
 
     const name = f.featureId === '_untagged' ? 'Untagged (third-party / unmapped)' : `${esc(f.name)} <span class="small">(${esc(f.featureId)})</span>`;
@@ -119,6 +121,7 @@ function renderHtml(report, gapsByFeature) {
   .summary-tbl td.num { text-align: right; font-variant-numeric: tabular-nums; }
   .badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; }
   .badge.high { background: #fce8e6; color: #b3261e; } .badge.medium { background: #fef3c7; color: #92400e; } .badge.low { background: #eef; color: #3730a3; }
+  .badge.pipeline { background: #eef2ff; color: #3730a3; } .badge.appbug { background: #fce8e6; color: #b3261e; } .badge.expected { background: #e6f4ea; color: #1a7f37; }
   </style></head><body>
   <div class="cover">
     <h1>Feature Coverage Report</h1>
@@ -140,6 +143,14 @@ function renderHtml(report, gapsByFeature) {
 
 function tile(k, v, d, mod) { return `<div class="tile ${mod}"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div><div class="d">${esc(d)}</div></div>`; }
 function sev(s) { return s === 'high' ? 'high' : s === 'medium' ? 'medium' : 'low'; }
+function classBadge(r) {
+  if (r.status !== 'failed') return '';
+  const mod = r.failureClass === 'pipeline-issue' ? 'pipeline'
+    : r.failureClass === 'possible-app-bug' ? 'appbug'
+    : r.failureClass === 'expected-behavior' ? 'expected' : '';
+  const label = r.failureClass || 'unclassified';
+  return `<span class="badge ${mod}">${esc(label)}</span>`;
+}
 
 async function printPdf(htmlFile, outPdf) {
   const noSandbox = process.env.PW_NO_SANDBOX === '1' || (typeof process.getuid === 'function' && process.getuid() === 0);

@@ -21,7 +21,7 @@ import { chromium } from 'playwright';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { attemptSsoLogin } from './auth/sso.mjs';
+import { attemptSsoLogin, tryPlainFormLogin } from './auth/sso.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '../../..');
@@ -40,12 +40,20 @@ function log(m) { console.log(`[harvest-token] ${m}`); }
 
 // The saved storageState alone may not authenticate (OIDC refresh cookie
 // rotated, or the app re-checks on load and bounces to /login). Recover the
-// same way the crawler does: the deterministic SSO/form driver, which fills
-// creds and clicks "Sign in with <provider>", stopping cleanly at MFA/popup.
+// same way the crawler does: try the plain form first, then fall back to the
+// deterministic SSO/form driver, which fills creds and clicks
+// "Sign in with <provider>", stopping cleanly at MFA/popup.
 async function ensureAuthed(page, baseUrl) {
   await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {});
   if (!LOGIN_URL_RE.test(page.url())) return true;
-  log(`bounced to ${page.url()} — recovering session via SSO/form driver`);
+  log(`bounced to ${page.url()} — recovering session`);
+
+  if (await tryPlainFormLogin(page, { email: LOGIN_EMAIL, password: LOGIN_PASSWORD })) {
+    await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {});
+    if (!LOGIN_URL_RE.test(page.url())) { log(`recovered via plain form → ${page.url()}`); return true; }
+  }
+
+  log(`trying SSO/form driver`);
   const isDone = (u) => !LOGIN_URL_RE.test(u);
   const sso = await attemptSsoLogin(page, {
     email: LOGIN_EMAIL, password: LOGIN_PASSWORD, isDone, log: console,
