@@ -54,6 +54,16 @@ function tableReady() {
 // exiting prematurely while a sibling is about to enqueue children.
 const IDLE_GRACE_MS = 750;
 
+// A dead page (renderer OOM on a heavy route, killed tab, closed context)
+// poisons every subsequent goto with an instant failure. Detect it so the
+// worker recreates its page instead of consuming the whole queue with a
+// corpse. Matches Playwright's crash/closure message family.
+const DEAD_PAGE_RE = /page crashed|target crashed|target closed|has been closed|browser has been disconnected|session closed/i;
+export function isDeadPage(page, err) {
+  try { if (page.isClosed()) return true; } catch { return true; }
+  return DEAD_PAGE_RE.test(err?.message || '');
+}
+
 // Per-list drill-down depth. When a page exposes a table / list of N similar
 // rows (each row navigates to /resource/detail?id=…), the walker clicks into
 // each row to reach its detail page. Scanning IS deep scanning — the default
@@ -74,7 +84,6 @@ export async function runWorker(opts) {
   const {
     workerId,
     state,
-    page,
     sameOrigin,
     safeRe,
     destrRe,
@@ -86,7 +95,10 @@ export async function runWorker(opts) {
     recordPage,   // optional: (page, label, depth, phase, extras) => Promise
     reAuth,       // optional: (page) => Promise<void>  — called on /login redirect
     scannerFn = DEFAULT_SCANNER,   // (page, opts) => { items, totalElements, rejected }
+    recreatePage, // optional: async (workerId) => Page — replace a crashed page
   } = opts;
+  // Reassignable: replaced with a fresh page when the renderer crashes.
+  let { page } = opts;
 
   let myActive = false;
   let idleSince = null;
@@ -115,8 +127,11 @@ export async function runWorker(opts) {
     log(`[w${workerId}] page (d=${depth}, ${state.pagesVisited}/${state.maxPages}): ${url}`);
 
     try {
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 })
-        .catch(e => { log(`[w${workerId}] nav failed: ${e.message}`); state.recordIssue({ type: 'nav-failed', workerId, url, message: e.message }); });
+      // A goto failure must NOT fall through to the scan: the page is either
+      // dead (crash — handled below) or still showing the PREVIOUS route, and
+      // scanning it would record this task's interactables under the wrong
+      // URL. Throw to the task-level handler, which requeues with a cap.
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
       // `load` event fires on initial HTML+resources. For an SPA, that's
       // BEFORE React mounts anything visible — and for apps doing silent
       // token refresh via iframe (Keycloak, Auth0, …) the body is still
@@ -475,6 +490,10 @@ export async function runWorker(opts) {
             // remaining candidates' locators still resolve. Don't dirty.
           }
         } catch (e) {
+          // A crashed page fails every remaining click instantly — escalate to
+          // the task-level handler (recreate + requeue) instead of burning
+          // through the click list against a corpse.
+          if (isDeadPage(page, e)) throw e;
           log(`[w${workerId}]     click failed: "${display}" — ${e.message.split('\n')[0].slice(0, 80)}`);
           state.recordIssue({ type: 'click-failed', workerId, url, message: `${display}: ${e.message}` });
           domDirty = true;
@@ -487,8 +506,37 @@ export async function runWorker(opts) {
         try { await recordPage(page, url, depth, phase, { workerId }); } catch {}
       }
     } catch (e) {
+      const dead = isDeadPage(page, e);
       log(`[w${workerId}] task failed: ${url} — ${e.message.split('\n')[0].slice(0, 120)}`);
-      state.recordIssue({ type: 'task-failed', workerId, url, message: e.message });
+      state.recordIssue({ type: dead ? 'page-crashed' : 'task-failed', workerId, url, message: e.message });
+
+      // Give the task another chance — it never actually got crawled.
+      if (state.requeue(task)) {
+        log(`[w${workerId}] requeued ${url} (attempt ${(task.attempts ?? 1) + 1}/${state.maxTaskAttempts})`);
+      } else {
+        state.recordIssue({ type: 'task-abandoned', workerId, url, message: `gave up after ${state.maxTaskAttempts} attempts` });
+        log(`[w${workerId}] abandoned ${url} after ${state.maxTaskAttempts} attempts`);
+      }
+
+      // A dead page poisons every later goto — replace it before the next
+      // task. If we can't get a fresh page, exit rather than consume the
+      // remaining queue with instant failures (siblings keep draining it).
+      if (dead) {
+        if (!recreatePage) {
+          log(`[w${workerId}] page dead and no recreatePage available — exiting`);
+          state.recordIssue({ type: 'worker-dead', workerId, url, message: 'page crashed; recreation unavailable' });
+          break;
+        }
+        try {
+          page = await recreatePage(workerId);
+          state.recordIssue({ type: 'page-recreated', workerId, url, message: 'fresh context after crash' });
+          log(`[w${workerId}] recreated page after crash — resuming`);
+        } catch (err) {
+          log(`[w${workerId}] page recreation failed (${err.message.split('\n')[0].slice(0, 80)}) — exiting`);
+          state.recordIssue({ type: 'worker-dead', workerId, url, message: `recreation failed: ${err.message}` });
+          break;
+        }
+      }
     }
   }
 

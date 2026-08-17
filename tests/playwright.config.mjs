@@ -37,6 +37,9 @@ function detectBaseUrl() {
 
 export default defineConfig({
   testDir: path.join(__dirname, 'e2e'),
+  // Quarantine dir for generated specs that fail the generator's syntax gate —
+  // must never be collected (one malformed spec aborts the whole suite).
+  testIgnore: '**/_invalid/**',
   timeout: 45_000,
   retries: 0,
   // Serial by design. SSO/OIDC apps mint a SINGLE-USE refresh token: two

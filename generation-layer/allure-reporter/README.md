@@ -5,9 +5,8 @@ Deterministic, no LLM. Writing the Allure result JSON needs nothing installed; r
 Allure CLI (a Java app — Java is present, so it runs via `npx allure-commandline`).
 
 ```bash
-# 1. produce inputs
-node generation-layer/ui-test-generator/gen.mjs   scenario.json   # UI run → screenshots + perf-timing
-#    (API results come from a prior `api-test`/`openapi-test` run)
+# 1. produce inputs (generates API+UI suites and runs them)
+node byo-llm-poc/ctx.mjs generate --json && node byo-llm-poc/ctx.mjs execute --json
 
 # 2. consolidate + view
 node generation-layer/allure-reporter/build.mjs --serve           # open the report

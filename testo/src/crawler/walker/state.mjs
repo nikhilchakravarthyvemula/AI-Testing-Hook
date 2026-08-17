@@ -14,13 +14,17 @@
 // `isBudgetExhausted()` lets workers exit gracefully when either fires.
 
 export class SharedState {
-  constructor({ seeds = [], budgetMs = 600_000, maxPages = 200, maxDepth = 5 } = {}) {
+  constructor({ seeds = [], budgetMs = 600_000, maxPages = 200, maxDepth = 5,
+                maxTaskAttempts = 2, skipRoutes = null } = {}) {
     this.startedAt        = Date.now();
     this.budgetMs         = budgetMs;
     this.maxPages         = maxPages;
     this.maxDepth         = maxDepth;
+    this.maxTaskAttempts  = maxTaskAttempts;  // total tries per task (1 initial + retries)
+    this.skipRoutes       = skipRoutes;       // RegExp | null — CRAWL_SKIP_ROUTES
+    this.skippedUrls      = new Set();        // routes excluded by skipRoutes
 
-    this.pending          = seeds.slice();  // [{ url, depth, phase?, parentUrl? }]
+    this.pending          = [];               // [{ url, depth, phase?, parentUrl?, attempts? }]
     this.interactedUrls   = new Set();
     this.navigatedPaths   = new Set();      // `${url}::${stableKey}`
     this.stateNodes       = new Set();      // `${url}#${stableKey}`
@@ -30,6 +34,13 @@ export class SharedState {
     this.issues           = [];             // [{ts, type, workerId?, url?, message}]
 
     this.activeWorkers    = 0;
+
+    // Seed filtering last — #skips records issues, so every field above
+    // (issues in particular) must already be initialized.
+    for (const s of seeds) {
+      if (this.#skips(s.url)) continue;
+      this.pending.push(s);
+    }
   }
 
   // Push a structured issue (click failed, nav failed, re-auth needed, …)
@@ -51,15 +62,40 @@ export class SharedState {
     return null;
   }
 
+  // Deliberate route exclusion (CRAWL_SKIP_ROUTES) — recorded once per URL
+  // so an excluded route shows up as `route-skipped`, never as silently lost.
+  #skips(url) {
+    if (!this.skipRoutes || !url || !this.skipRoutes.test(url)) return false;
+    if (!this.skippedUrls.has(url)) {
+      this.skippedUrls.add(url);
+      this.recordIssue({ type: 'route-skipped', url, message: 'matched CRAWL_SKIP_ROUTES' });
+    }
+    return true;
+  }
+
   // ── queue ─────────────────────────────────────────────────────────────
   enqueue(task) {
     // Skip if already known. The atomic check + push happens here so
     // multiple workers enqueueing the same discovered URL never produce
     // duplicates.
     if (!task || !task.url) return false;
+    if (this.#skips(task.url)) return false;
     if (this.interactedUrls.has(task.url)) return false;
     if (this.pending.some(t => t.url === task.url)) return false;
     this.pending.push(task);
+    return true;
+  }
+
+  // Put a failed task back for another try. The URL was reserved by
+  // tryDequeue (added to interactedUrls) but never actually crawled, so
+  // un-reserve it first. Returns false once the attempt cap is reached —
+  // the caller records the task as abandoned.
+  requeue(task) {
+    if (!task || !task.url) return false;
+    const attempts = (task.attempts ?? 1) + 1;
+    if (attempts > this.maxTaskAttempts) return false;
+    this.interactedUrls.delete(task.url);
+    this.pending.push({ ...task, attempts });
     return true;
   }
 
@@ -130,6 +166,7 @@ export class SharedState {
       edgeCounts: { total: this.clickGraph.length, nav: navEdges, state: stateEdges },
       issueCounts,
       nodes: [...this.interactedUrls],
+      skippedRoutes: [...this.skippedUrls],
       stateNodes: [...this.stateNodes],
       discoveredViaClick: [...this.discoveredViaClick],
       navigatedPaths: [...this.navigatedPaths],

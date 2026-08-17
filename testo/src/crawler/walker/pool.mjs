@@ -23,9 +23,9 @@ import { chromium } from 'playwright';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { SharedState }       from './state.mjs';
-import { runWorker }         from './worker.mjs';
-import { scanInteractables } from './scanner.mjs';
+import { SharedState }          from './state.mjs';
+import { runWorker, isDeadPage } from './worker.mjs';
+import { scanInteractables }    from './scanner.mjs';
 
 /**
  * @param {Object} opts
@@ -51,7 +51,8 @@ import { scanInteractables } from './scanner.mjs';
 export async function runWalkerPool(opts) {
   const {
     seeds = [],
-    workers: workerCount = Number(process.env.CRAWL_WORKERS || 8),
+    // Default 1 (was 8): safe on rotating-token SSO apps — see crawl.mjs.
+    workers: workerCount = Number(process.env.CRAWL_WORKERS || 1),
     sameOrigin = null,
     safeRe,
     destrRe,
@@ -98,9 +99,20 @@ export async function runWalkerPool(opts) {
     phase: s.phase || 'seed',
   }));
 
+  // CRAWL_SKIP_ROUTES: deliberate exclusion for routes known to kill the
+  // renderer (heavy canvas/WebGL pages) — excluded routes are recorded as
+  // `route-skipped`, never silently lost.
+  const skipRoutes = (() => {
+    const raw = process.env.CRAWL_SKIP_ROUTES;
+    if (!raw) return null;
+    try { return new RegExp(raw, 'i'); }
+    catch (e) { log(`[walker-pool] invalid CRAWL_SKIP_ROUTES regex (${e.message}) — ignoring`); return null; }
+  })();
+
   const state = new SharedState({
     seeds: seedTasks,
     budgetMs, maxPages, maxDepth,
+    skipRoutes,
   });
 
   log(`[walker-pool] starting — seeds=${seeds.length} workers=${workerCount}(max) maxPages=${maxPages} maxDepth=${maxDepth} budget=${Math.round(budgetMs/1000)}s preDiscovery=${preDiscovery}`);
@@ -127,20 +139,37 @@ export async function runWalkerPool(opts) {
   // so the per-page state edges still get captured by the pool.
   if (preDiscovery && seedTasks.length > 0) {
     log(`[walker-pool] discovery phase — scanning ${seedTasks.length} seed(s) to enumerate routes`);
-    const dctx = await newSeededContext();
-    const dpage = await dctx.newPage();
+    let dctx = await newSeededContext();
+    let dpage = await dctx.newPage();
     if (onContextReady) {
       try { await onContextReady(dctx, dpage, 0); }
       catch (e) { log(`[walker-pool] discovery context setup failed: ${e.message}`); }
     }
 
-    for (const seed of seedTasks) {
+    // Queue (not for-of) so a seed whose tab crashed can be retried once on
+    // the replacement context instead of being silently dropped.
+    const seedQueue = seedTasks.map(s => ({ ...s }));
+    while (seedQueue.length) {
+      const seed = seedQueue.shift();
       try {
         await dpage.goto(seed.url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
         await dpage.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {});
         await dpage.waitForTimeout(postNavWaitMs);
       } catch (e) {
         log(`[walker-pool] discovery nav failed for ${seed.url}: ${e.message.split('\n')[0].slice(0, 100)}`);
+        if (isDeadPage(dpage, e)) {
+          // Dead discovery tab poisons every remaining seed — replace it.
+          state.recordIssue({ type: 'page-crashed', workerId: 0, url: seed.url, message: e.message });
+          await dctx.close().catch(() => {});
+          dctx = await newSeededContext();
+          dpage = await dctx.newPage();
+          if (onContextReady) {
+            try { await onContextReady(dctx, dpage, 0); }
+            catch (err) { log(`[walker-pool] discovery context re-setup failed: ${err.message}`); }
+          }
+          if (!seed.crashRetried) seedQueue.push({ ...seed, crashRetried: true });
+          else state.recordIssue({ type: 'task-abandoned', workerId: 0, url: seed.url, message: 'seed crashed twice during discovery' });
+        }
         continue;
       }
 
@@ -193,7 +222,13 @@ export async function runWalkerPool(opts) {
     log(`[walker-pool] sized workers to ${effectiveWorkers} (queue=${state.queueLength}, requested=${workerCount})`);
   }
 
-  const STAGGER_MS = Number(process.env.WORKER_STAGGER_MS) || 2500;
+  // `|| 2500` would silently ignore an explicit WORKER_STAGGER_MS=0 (a valid
+  // choice on plain cookie-session apps); only fall back when unset/invalid.
+  const staggerRaw = Number(process.env.WORKER_STAGGER_MS);
+  const STAGGER_MS = process.env.WORKER_STAGGER_MS !== undefined &&
+                     process.env.WORKER_STAGGER_MS !== '' &&
+                     Number.isFinite(staggerRaw) && staggerRaw >= 0
+    ? staggerRaw : 2500;
   const readyOne = async ({ ctx, page, workerId }) => {
     if (onContextReady) {
       try { await onContextReady(ctx, page, workerId); }
@@ -236,6 +271,19 @@ export async function runWalkerPool(opts) {
     contexts.push({ ctx, page, workerId: i + 1 });
   }
 
+  // Replace a worker's crashed page with a fresh, authenticated context.
+  // Seeded from the latest saved auth-state and run through the same
+  // onContextReady wiring as at bring-up, so the worker resumes logged in.
+  const recreatePage = async (workerId) => {
+    const slot = contexts.find(c => c.workerId === workerId);
+    if (slot) await slot.ctx.close().catch(() => {});
+    const ctx  = await newSeededContext();
+    const page = await ctx.newPage();
+    if (slot) { slot.ctx = ctx; slot.page = page; }
+    await readyOne({ ctx, page, workerId });
+    return page;
+  };
+
   // ── BRING WORKERS UP ──────────────────────────────────────────────────
   // Staggered when auth is involved (so their first loads don't collide on the
   // silent-refresh endpoint); plain-parallel when there's no auth.
@@ -276,7 +324,7 @@ export async function runWalkerPool(opts) {
       sameOrigin, safeRe, destrRe, neverRe,
       maxClicksPerPage, maxListItemsPerNav, postNavWaitMs,
       log, recordPage, reAuth,
-      scannerFn,
+      scannerFn, recreatePage,
     }).catch(e => {
       log(`[walker-pool] worker ${workerId} crashed: ${e.message}`);
       state.recordIssue({ type: 'worker-crashed', workerId, message: e.message });

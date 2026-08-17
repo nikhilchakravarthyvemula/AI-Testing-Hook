@@ -6,19 +6,20 @@
   "description": "Architecture-shaped testing harness. See README.md for folder → diagram mapping.",
   "scripts": {
     "login": "SEED_PATH=/ node testo/src/crawler/login-once.mjs",
-    "test:ui": "node generation-layer/ui-test-generator/gen.mjs scenario.json",
+    "test:ui": "node byo-llm-poc/ctx.mjs generate --json && npx playwright test --config=tests/playwright.config.mjs",
     "test:perf": "node generation-layer/perf-test-generator/gen.mjs scenario.json",
     "report:build": "node generation-layer/allure-reporter/build.mjs",
-    "report": "node generation-layer/ui-test-generator/gen.mjs scenario.json ; node generation-layer/perf-test-generator/gen.mjs scenario.json ; node generation-layer/allure-reporter/build.mjs --serve",
-    "report:html": "node generation-layer/ui-test-generator/gen.mjs scenario.json ; node generation-layer/perf-test-generator/gen.mjs scenario.json ; node generation-layer/allure-reporter/build.mjs --generate",
-    "pdf": "node generation-layer/pdf-reporter/build-pdf.mjs",
-    "report:pdf": "node generation-layer/ui-test-generator/gen.mjs scenario.json ; node generation-layer/perf-test-generator/gen.mjs scenario.json ; node generation-layer/pdf-reporter/build-pdf.mjs",
+    "report": "node generation-layer/allure-reporter/build.mjs --serve",
+    "report:html": "node generation-layer/allure-reporter/build.mjs --generate",
+    "pdf": "node generation-layer/feature-slice/report-pdf.mjs",
+    "report:pdf": "node byo-llm-poc/ctx.mjs report --json",
     "extract": "node context-layer/content-extractor/run.mjs",
     "extract:live": "ONLY=crawler npm run --silent extract",
     "extract:code": "SKIP=crawler npm run --silent extract",
     "extract:fastapi": "ONLY=python-fastapi npm run --silent extract",
     "crawler": "cd testo/src/crawler && npm run all",
-    "code-ast": "context-layer/content-extractor/_lib/.venv/bin/python context-layer/content-extractor/code-extractors/python-ast/extract.py"
+    "code-ast": "context-layer/content-extractor/_lib/.venv/bin/python context-layer/content-extractor/code-extractors/python-ast/extract.py",
+    "test:walker": "node tests/walker/crash-recovery.test.mjs"
   },
   "workspaces": [
     "testo/src/crawler"

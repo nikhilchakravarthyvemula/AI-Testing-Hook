@@ -38,9 +38,10 @@ in the pipeline is deterministic.
 │
 ├── generation-layer/           ▼ Generation Layer
 │   ├── api-test-generator/       deterministic curl-test builder + runner (skill)
-│   ├── ui-test-generator/        scenario-driven Playwright specs
 │   ├── perf-test-generator/      perf scripts
-│   └── allure-reporter/ pdf-reporter/  reporting
+│   ├── feature-slice/            feature manifest + tagging + PDF report (report-pdf.mjs)
+│   └── allure-reporter/          Allure reporting
+│       (UI specs: testo/src/crawler/generator/e2e.mjs via `ctx generate`)
 │
 ├── execution-layer/            ▼ Execution Layer (report-generator stub)
 ├── feedback/                   ▼ feedback arrow (future: storage skills — docs/spec-10)

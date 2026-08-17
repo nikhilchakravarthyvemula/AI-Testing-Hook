@@ -921,10 +921,13 @@ if (CRAWL_DISABLED) {
   console.log('[crawl] CRAWL_DISABLED=1 — skipping walker (no pages crawled)');
 } else {
   const sameOrigin = (() => { try { return new URL(BASE_URL).origin; } catch { return null; } })();
-  // Default bumped 4 → 8: with the pre-discovery phase + dynamic sizing
-  // in pool.mjs, this is the *upper bound*. It's not "always spawn 8";
-  // it's "spawn up to 8 if the discovery phase finds that many routes."
-  const CRAWL_WORKERS = Number(process.env.CRAWL_WORKERS || 8);
+  // Default dropped 8 → 1: parallel contexts cloned from one auth-state race
+  // single-use refresh tokens on rotating-SSO apps (OIDC/Keycloak/Firebase) —
+  // whichever context refreshes first consumes the token and the rest cascade
+  // into serialized ~75s recoveries, hollowing out the scan. Parallelism is
+  // opt-in (CRAWL_WORKERS=N) until shared refresh-broadcast lands; pool.mjs
+  // still sizes down to the queue, so N is an upper bound, not a fleet size.
+  const CRAWL_WORKERS = Number(process.env.CRAWL_WORKERS || 1);
 
   const seedTasks = [
     ...SEED_PATHS.map(p     => ({ url: `${BASE_URL}${p}`, depth: 0, phase: 'seed' })),

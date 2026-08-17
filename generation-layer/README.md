@@ -3,20 +3,20 @@
 | Component | Role | Status |
 |---|---|---|
 | `api-test-generator/` | Indexed APIs → runnable curl tests; logs in, runs with auth | ✅ |
-| `ui-test-generator/` | `scenario.json` → Playwright UI test + Web Vitals; runs + reports. Standalone Node script (not yet a skill). | ✅ |
 | `perf-test-generator/` | `scenario.json` → JMeter `.jmx` load plan + run script + `.jtl` parser. Standalone Node script. | ✅ |
 | `allure-reporter/` | Consolidates API + UI + Perf results into one **Allure** report (pass/fail + reasons, per-step screenshots, route/API/object timing). Standalone Node script. | ✅ |
-| `pdf-reporter/` | Consolidates API + UI + Perf into a single shareable **PDF** (cover, API table + reasons, UI steps with embedded screenshots, perf timing). Headless `page.pdf()`, no new dep. | ✅ |
-| `test-plan-creator/` | Reads output/indexed_output + gap-analyzer output, emits explicit `test-plan.json`. Until it exists, `scenario.json` (repo root) is the hand-authored stand-in consumed by the UI/perf generators. | planned |
-| `test-script-generator/` | Emits runnable Playwright .spec.mjs files. Today: in context-layer/content-extractor/crawler/generator/. | 🚧 |
+| `feature-slice/` | Feature manifest resolver, per-feature test tagging, failure classification, and the consolidated **PDF report** (`report-pdf.mjs`, also standalone: `npm run pdf`). | ✅ |
+| `test-plan-creator/` | Reads output/indexed_output + gap-analyzer output, emits explicit `test-plan.json`. | planned |
 | `mock-data-creator/` | Field-type defaults + per-app config overrides | planned |
-| `validator/` | ESLint + parse-check + diff vs previous generation | planned |
+| `validator/` | Syntax gate lives in the UI generator today (`node --check` + `tests/e2e/_invalid/` quarantine); ESLint + diff vs previous generation | 🚧 |
 
-**UI/perf generators are deterministic and dependency-light:** no LLM, no skill-register wiring,
-no `@playwright/test` / `npm install` (they use the `playwright` library + Chromium already in the
-repo). Run directly:
+**UI test generation** lives in `testo/src/crawler/generator/e2e.mjs` (crawl output →
+Playwright `.spec.mjs` suites in `tests/e2e/`), invoked via `ctx generate`. The former
+`ui-test-generator/` (scenario.json-driven) and `pdf-reporter/` were retired as
+duplicates of that path and `feature-slice/report-pdf.mjs` respectively (SDD §3.4).
 
 ```bash
-node generation-layer/ui-test-generator/gen.mjs   scenario.json
+node byo-llm-poc/ctx.mjs generate --json          # API curls + UI specs
 node generation-layer/perf-test-generator/gen.mjs scenario.json
+node generation-layer/feature-slice/report-pdf.mjs   # PDF from existing results
 ```

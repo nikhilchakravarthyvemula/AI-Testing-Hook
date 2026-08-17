@@ -152,11 +152,13 @@ run_stage() {  # <name> <critical:0|1> <cmd...>
   node context-layer/scan.mjs
 
 if [[ "$RUN_GENERATION" == 1 ]]; then
+  # UI generation+execution consolidated onto the ctx path (the same generator
+  # the skill flow uses — testo e2e.mjs + Playwright). The scenario.json-driven
+  # ui-test-generator was retired as a duplicate (SDD §3.4 "Duplication").
+  run_stage "Test generation (API curls + UI specs)" 0 node byo-llm-poc/ctx.mjs generate --json
+  run_stage "Test execution (API + UI)"              0 node byo-llm-poc/ctx.mjs execute --json
   if [[ -f "$SCENARIO" ]]; then
-    run_stage "UI test generation + run"   0 node generation-layer/ui-test-generator/gen.mjs "$SCENARIO"
     run_stage "Perf test generation + run" 0 node generation-layer/perf-test-generator/gen.mjs "$SCENARIO"
-  else
-    warn "RUN_GENERATION=1 but SCENARIO '$SCENARIO' not found — skipping generation"
   fi
 fi
 

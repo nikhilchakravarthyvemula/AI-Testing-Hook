@@ -7,8 +7,9 @@
 // feature's concrete gaps + endpoints). Emits one section PER FEATURE — ordered
 // by gap priority — showing coverage, the specific gaps to close, and the
 // feature's API + UI tests. Renders print HTML and prints it with the installed
-// playwright chromium `page.pdf()` (headless, no display, no new dependency) —
-// the same mechanism as generation-layer/pdf-reporter/build-pdf.mjs.
+// playwright chromium `page.pdf()` (headless, no display, no new dependency).
+// This is THE pdf builder — the old generation-layer/pdf-reporter/ duplicate
+// was retired (SDD §3.4 "Duplication").
 //
 // Output: output/generation/report-features.pdf (+ .html intermediate)
 // Usage: node generation-layer/feature-slice/report-pdf.mjs [--output <path>]

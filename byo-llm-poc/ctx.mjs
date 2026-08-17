@@ -17,6 +17,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadDotEnv, logCrawlerConfig } from './config.mjs';
 import { loadFeatureManifest, tagRows, summarizeFeatures, templatizePath } from '../generation-layer/feature-slice/tag.mjs';
 import { buildFeaturePdf } from '../generation-layer/feature-slice/report-pdf.mjs';
 import { attachFailureClassification, extractUiFailureFacts } from '../generation-layer/feature-slice/classify-failure.mjs';
@@ -57,6 +58,7 @@ function normMode(m) { return String(m || 'safe').toLowerCase() === 'full' ? 'fu
 
 // ── stdout is JSON-only; everything else goes to stderr + a run log ──────────
 let LOG_FILE = null;
+let DOTENV = null;   // result of loadDotEnv(), set in main() before dispatch
 function log(...a) {
   const line = a.join(' ');
   process.stderr.write(line + '\n');
@@ -228,6 +230,11 @@ async function cmdScan(opts) {
   openLog(runId);
   const startedAt = new Date().toISOString();
 
+  // Effective crawler config + misconfiguration warnings (set-but-ignored
+  // knobs, legacy names, unsafe worker counts). Warnings also go in the
+  // envelope so the host model sees them without reading the log.
+  const configWarnings = logCrawlerConfig(log, { dotenv: DOTENV });
+
   const stages = [];
   if (!opts.reuse) {
     // A scan is the pre-testing baseline: drop any prior run's coverage so the
@@ -299,6 +306,7 @@ async function cmdScan(opts) {
     target: { baseUrl: opts.url ?? crawler?.target?.baseUrl ?? null, codebase: opts.codebase ?? null },
     stages,
     counts,
+    configWarnings,
     authRequired: authRequired || null,
     delegations: delegation ? [delegation] : [],
     consumable: {
@@ -1160,6 +1168,9 @@ async function cmdExecute(opts) {
 function main() {
   const [cmd, ...rest] = process.argv.slice(2);
   const opts = parseArgs(rest);
+  // Load .env before any command runs (creds for scan/execute, knobs for the
+  // crawler). Already-exported variables always win over .env values.
+  DOTENV = loadDotEnv(REPO_ROOT);
   switch (cmd) {
     case 'scan': return cmdScan(opts);
     case 'context': return cmdContext(opts);

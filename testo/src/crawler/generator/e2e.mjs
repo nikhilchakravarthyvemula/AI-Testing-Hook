@@ -801,7 +801,7 @@ ${shape ? `  if (response.headers()['content-type']?.includes('json')) {
 ${shape.type === 'object' ? `    // Captured response had keys: ${shape.keys.join(', ')}
     for (const key of ${JSON.stringify(shape.keys)}) {
       expect.soft(body, \`missing key '\${key}' — schema changed?\`).toHaveProperty(key);
-    }` : `    expect(${shape.type === 'array' ? 'Array.isArray(body)' : 'typeof body'}).${shape.type === 'array' ? 'toBe(true)' : `toBe('${shape.type}')`});`}
+    }` : `    expect(${shape.type === 'array' ? 'Array.isArray(body)' : 'typeof body'}).${shape.type === 'array' ? 'toBe(true)' : `toBe('${shape.type}')`};`}
   }
 ` : ''}});
 `;
@@ -904,6 +904,40 @@ ${fills}
 `;
     fs.writeFileSync(path.join(SUB.forms, `${formSlug}.spec.mjs`), code);
     formsWritten++;
+  }
+}
+
+// ============================================================
+// PART 3e — Validation gate: syntax-check every generated spec
+// ============================================================
+// One malformed spec makes Playwright refuse the ENTIRE suite (observed
+// 2026-08-17: a template bug produced `toBe(true));` in one API spec and 0/78
+// UI tests ran). Every generated file is checked with `node --check`; invalid
+// ones are quarantined to tests/e2e/_invalid/ so the healthy suite still runs.
+{
+  const { execFileSync } = await import('node:child_process');
+  const invalidDir = path.join(E2E_DIR, '_invalid');
+  const byCat = { flows: 0, api: 0, auth: 0, forms: 0 };
+  for (const [cat, dir] of Object.entries(SUB)) {
+    if (!(cat in byCat) || !fs.existsSync(dir)) continue;
+    for (const f of fs.readdirSync(dir).filter(n => n.endsWith('.spec.mjs'))) {
+      const full = path.join(dir, f);
+      try {
+        execFileSync('node', ['--check', full], { stdio: 'pipe' });
+      } catch (e) {
+        fs.mkdirSync(invalidDir, { recursive: true });
+        fs.renameSync(full, path.join(invalidDir, f));
+        byCat[cat]++;
+        const msg = String(e.stderr || e.message).split('\n')[0].slice(0, 140);
+        console.log(`[e2e] ⚠ INVALID spec quarantined: ${cat}/${f} — ${msg}`);
+      }
+    }
+  }
+  const total = byCat.flows + byCat.api + byCat.auth + byCat.forms;
+  if (total > 0) {
+    flowsWritten -= byCat.flows; apiWritten -= byCat.api;
+    authWritten  -= byCat.auth;  formsWritten -= byCat.forms;
+    console.log(`[e2e] ⚠ ${total} invalid spec(s) moved to tests/e2e/_invalid/ — generator bug, report it`);
   }
 }
 
