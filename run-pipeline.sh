@@ -111,9 +111,10 @@ if [[ "$DO_SETUP" == 1 ]]; then
       && ok "venv ready" || warn "venv setup failed — code extractors may not run"
   fi
   if [[ -n "${BASE_URL:-}" ]]; then
-    if [[ -d scripts/crawler/node_modules ]]; then ok "crawler deps present"; else
-      log "installing crawler deps (Playwright + Crawlee)…"
-      ( cd scripts/crawler && npm install ) && npx playwright install chromium \
+    # Root npm install covers the crawler too (testo/src/crawler is a workspace).
+    if [[ -x node_modules/.bin/playwright ]]; then ok "crawler deps present"; else
+      log "installing node deps (Playwright + Crawlee via workspaces)…"
+      npm install && npx playwright install chromium \
         && ok "crawler ready" || warn "crawler setup failed — live crawl may not run"
     fi
   fi
