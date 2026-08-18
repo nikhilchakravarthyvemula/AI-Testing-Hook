@@ -100,6 +100,13 @@ export const KNOBS = {
   SKIP_PASS1:          { scope: 'pass2', def: '0', desc: 'deep-crawl: reuse pass-1 output' },
 
   // auth
+  AUTH_PROFILE:        { scope: 'auth', def: 'auth-profile.json', desc: 'path to the per-target auth profile (TTL, provider exclusions, cert handling)' },
+  AUTH_TTL_SECONDS:    { scope: 'auth', def: '(from auth-profile)', desc: 'session TTL estimate; enables proactive keeper refresh at ~50% of it (0 disables)' },
+  AUTH_REFRESH_AT_FRACTION: { scope: 'auth', def: '0.5', desc: 'where in the TTL window the keeper refreshes (0-1)' },
+  AUTH_MAX_AGE_S:      { scope: 'auth', def: '1800', desc: 'ensure-fresh staleness threshold when no TTL is declared' },
+  EXCLUDE_SSO_PROVIDERS: { scope: 'pass1', def: '(built-in provider list)', desc: 'comma-separated "Sign in with <provider>" buttons the walker never clicks; none disables' },
+  CRAWL_IGNORE_HTTPS_ERRORS: { scope: 'auth', def: '0', desc: 'accept internally-signed certs in every browser context (crawler, harvest, login, playwright)' },
+  LOGIN_PATH:          { scope: 'auth', def: '(SEED_PATH)', desc: 'route hosting the app\'s own login form (auth-profile loginPath override)' },
   LOGIN_EMAIL:         { scope: 'auth', def: '(unset)', desc: 'login identity', secret: true },
   LOGIN_PASSWORD:      { scope: 'auth', def: '(unset)', desc: 'login secret', secret: true },
   LOGIN_URL_REGEX:     { scope: 'auth', def: '/(login|sign-?in|signin|auth)', desc: 'what counts as a login URL' },
@@ -130,7 +137,7 @@ export const KNOBS = {
 
 // Env keys that look like crawler knobs. Anything matching this that is set
 // but NOT in the registry is a typo or a knob nothing reads anymore.
-const KNOB_SHAPED = /^(CRAWL|CRAWLER|DEEP|LOGIN|SEED|WORKER|INTERCEPT|CAPTURE|URL_STABLE|MAX_INTERACT|MAX_LIST|SAFE_CLICK|NEVER_CLICK|DESTRUCTIVE_CLICK|POST_CRAWL|POST_NAV|HARVEST|HEADLESS|PLAYWRIGHT|SYNTH_MAX|E2E_MAX|SKIP_)/;
+const KNOB_SHAPED = /^(CRAWL|CRAWLER|DEEP|LOGIN|SEED|WORKER|INTERCEPT|CAPTURE|URL_STABLE|MAX_INTERACT|MAX_LIST|SAFE_CLICK|NEVER_CLICK|DESTRUCTIVE_CLICK|POST_CRAWL|POST_NAV|HARVEST|HEADLESS|PLAYWRIGHT|SYNTH_MAX|E2E_MAX|SKIP_|AUTH_|EXCLUDE_SSO)/;
 
 const HEADLINE = [
   'CRAWL_WORKERS', 'CRAWL_BUDGET_MS', 'MAX_INTERACT_PAGES', 'MAX_INTERACT_DEPTH',
@@ -190,11 +197,15 @@ export function logCrawlerConfig(log, { dotenv } = {}) {
     log(`[config] ℹ CRAWL_BUDGET_MS=0 — unbounded crawl: runs until the frontier drains, bounded by MAX_INTERACT_PAGES=${process.env.MAX_INTERACT_PAGES || '200'} and list-sampling caps`);
   }
 
-  // warn: parallel crawl on an app we can't yet keep authenticated in parallel
+  // notice: parallel crawl on rotating-token SSO apps. The session keeper
+  // (warm-up + single-flight recovery + broadcast refresh) makes >1 workable,
+  // but it needs a TTL to refresh proactively — without one the keeper is
+  // reactive-only and recovery storms still cost wall-clock.
   const workers = Number(process.env.CRAWL_WORKERS || 1);
   if (workers > 1) {
-    const w = `CRAWL_WORKERS=${workers}: parallel contexts race single-use refresh tokens on rotating-SSO apps (hollow-scan risk). Keep 1 unless the target has a plain cookie session.`;
-    warnings.push(w); log(`[config] ⚠ ${w}`);
+    const hasTtl = !!process.env.AUTH_TTL_SECONDS;
+    const w = `CRAWL_WORKERS=${workers}: parallel contexts share one rotating session — the keeper broadcasts refreshes, but declare the session TTL (auth-profile.json ttlSeconds or AUTH_TTL_SECONDS) so it refreshes proactively${hasTtl ? '' : ' (no TTL declared → reactive-only)'}`;
+    warnings.push(w); log(`[config] ${hasTtl ? 'ℹ' : '⚠'} ${w}`);
   }
 
   return warnings;

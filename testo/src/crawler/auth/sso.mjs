@@ -35,6 +35,37 @@ export const EXTERNAL_IDP_RE =
 const SSO_BUTTON_TEXT_RE =
   /\b(sign in|log ?in|continue|authenticate)\b.{0,12}\bwith\b|^\s*(sso|single sign[- ]?on)\s*$/i;
 
+// ── never-click SSO providers (crawler-side) ───────────────────────────────
+// The WALKER must never click a "Sign in with <provider>" button: each click
+// starts an OAuth redirect to the IdP — a wasted click cycle at best, and on
+// rotating-token IdPs it can rotate/poison the saved session state. This is
+// distinct from the auth flow above (attemptSsoLogin clicks these buttons
+// deliberately, during login — that path is unaffected by never-click).
+//
+// EXCLUDE_SSO_PROVIDERS env: comma-separated provider names to block
+// (default = the built-in list). '0'/'none' disables the SSO never-click merge.
+export const DEFAULT_SSO_PROVIDERS = [
+  'google', 'microsoft', 'azure', 'office 365', 'entra', 'apple',
+  'github', 'gitlab', 'okta', 'onelogin', 'auth0', 'ping', 'duo',
+  'keycloak', 'facebook', 'linkedin', 'saml', 'sso', 'single sign-on',
+];
+
+const reEscape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// Regex SOURCE (not a RegExp) matching "sign in / log in / continue /
+// authenticate … with … <provider>" button labels, plus bare "SSO"-style
+// labels. Merged into NEVER_CLICK_REGEX by crawl.mjs so the scanner rejects
+// these pre-click (rejected: 'never-click').
+export function ssoNeverClickSource(providers = DEFAULT_SSO_PROVIDERS) {
+  const alts = providers
+    .map((p) => String(p).trim().toLowerCase())
+    .filter(Boolean)
+    .map((p) => reEscape(p).replace(/[\s-]+/g, '[\\s-]?'));
+  if (!alts.length) return null;
+  return `\\b(?:sign[\\s-]?in|log[\\s-]?in|continue|authenticate)\\b[\\s\\S]{0,12}\\bwith\\b[\\s\\S]{0,12}\\b(?:${alts.join('|')})\\b` +
+         `|^\\s*(?:sso|single[\\s-]?sign[\\s-]?on)\\s*$`;
+}
+
 const PROVIDER_HINTS = [
   { provider: 'google', re: /google/i },
   { provider: 'microsoft', re: /microsoft|azure|office\s*365|entra/i },

@@ -22,6 +22,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { attemptSsoLogin, tryPlainFormLogin } from './auth/sso.mjs';
+import { shouldPersist } from './lib/session-material.mjs';
+import { loadAuthProfile } from './auth/profile.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '../../..');
@@ -99,8 +101,12 @@ async function main() {
   if (!fs.existsSync(AUTH_STATE)) { log(`no saved session at ${path.relative(REPO_ROOT, AUTH_STATE)}`); process.exit(1); }
 
   log(`base=${baseUrl} · driving authenticated routes to capture the app's bearer…`);
+  const profile = loadAuthProfile(REPO_ROOT, { log });
   const browser = await chromium.launch({ headless: HEADLESS });
-  const ctx = await browser.newContext({ storageState: AUTH_STATE });
+  const ctx = await browser.newContext({
+    storageState: AUTH_STATE,
+    ...(profile.ignoreHTTPSErrors ? { ignoreHTTPSErrors: true } : {}),
+  });
   const page = await ctx.newPage();
 
   let captured = null;   // { token, scheme, origin, header }
@@ -141,13 +147,25 @@ async function main() {
   // the crawler's warm-up + this harvest both feed one auth-state.json, and no
   // spec logs in on its own (which, with parallel workers, raced on the
   // single-use SSO refresh token and left the page blank — the bucket-2 bug).
-  // Guard: only overwrite when we're actually on an app page (not /login), so a
-  // failed recovery can't clobber a good saved session with a login shell.
+  // Guard: URL check alone false-positives — a route guard that fails open
+  // renders the shell at a real path while the session is hollow, and saving
+  // that capture clobbers a good auth-state with one that has no session
+  // material. So: on an app page AND the capture carries at least as much
+  // session material as the saved state (shouldPersist, shared with the
+  // crawler's persistSession / onAuthWarmed guards).
   const authed = !LOGIN_URL_RE.test(page.url());
   if (authed) {
     try {
-      await ctx.storageState({ path: AUTH_STATE, indexedDB: true });
-      log(`✓ refreshed session → ${path.relative(REPO_ROOT, AUTH_STATE)}`);
+      const fresh = await ctx.storageState({ indexedDB: true });
+      let prior = null;
+      try { prior = JSON.parse(fs.readFileSync(AUTH_STATE, 'utf8')); } catch {}
+      const verdict = shouldPersist(fresh, prior);
+      if (verdict.ok) {
+        fs.writeFileSync(AUTH_STATE, JSON.stringify(fresh));
+        log(`✓ refreshed session → ${path.relative(REPO_ROOT, AUTH_STATE)}`);
+      } else {
+        log(`not re-saving session — ${verdict.reason}; leaving auth-state.json untouched`);
+      }
     } catch (e) { log(`could not re-save auth-state.json: ${e.message}`); }
   } else {
     log('not on an authenticated page — leaving auth-state.json untouched');

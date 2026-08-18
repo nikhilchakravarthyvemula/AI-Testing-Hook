@@ -27,6 +27,7 @@ import readline from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 
 import { attemptSsoLogin } from './auth/sso.mjs';
+import { loadAuthProfile } from './auth/profile.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
@@ -179,8 +180,9 @@ async function main() {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   if (!LOGIN_EMAIL) console.warn('[login-once] LOGIN_EMAIL not set; auto-fill of email steps will be skipped.');
 
+  const profile = loadAuthProfile(REPO_ROOT, { log: console.log.bind(console) });
   const browser = await chromium.launch({ headless: false });
-  const ctx = await browser.newContext();
+  const ctx = await browser.newContext(profile.ignoreHTTPSErrors ? { ignoreHTTPSErrors: true } : {});
   const page = await ctx.newPage();
 
   const url = `${BASE_URL}${SEED_PATH}`;

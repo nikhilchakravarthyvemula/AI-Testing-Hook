@@ -27,9 +27,12 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 import { adviseOn } from './llm-advisor/index.mjs';
-import { attemptSsoLogin, EXTERNAL_IDP_RE } from './auth/sso.mjs';
+import { attemptSsoLogin, EXTERNAL_IDP_RE, ssoNeverClickSource, DEFAULT_SSO_PROVIDERS } from './auth/sso.mjs';
 import { runWalkerPool } from './walker/pool.mjs';
 import { routeKey } from './lib/route-key.mjs';
+import { totalMaterial, shouldPersist } from './lib/session-material.mjs';
+import { loadAuthProfile, refreshIntervalMs } from './auth/profile.mjs';
+import { broadcastSessionToContext } from './walker/inject-storage.mjs';
 
 // ── API-template novelty tracker (whole-app step 3) ──────────────────────────
 // First-seen API templates (METHOD + templatized URL) credited to the page
@@ -133,6 +136,19 @@ const NEVER_CLICK_REGEX = new RegExp(
     '|\\b(?:delete|remove|close|deactivate|terminate|deprovision)\\b[\\s\\S]{0,20}\\b(?:account|organization|org|workspace|tenant|profile|everything)\\b',
   'i'
 );
+// Per-target auth behavior (TTL, provider exclusions, cert handling) —
+// auth-profile.json + env overrides. See auth/profile.mjs for the shape.
+const AUTH_PROFILE = loadAuthProfile(REPO_ROOT, { log: console.log.bind(console) });
+// Pre-click SSO guard: "Sign in with <provider>" buttons redirect to the IdP —
+// a wasted click cycle at best, auth-state poisoning at worst (the OAuth
+// round-trip can rotate the saved session's tokens). Merged into the walker's
+// never-click set so the scanner rejects them BEFORE any click happens. The
+// login flow itself (attemptSsoLogin) is unaffected — it clicks these buttons
+// deliberately, outside the walker's click loop.
+const SSO_NEVER_SRC = ssoNeverClickSource(AUTH_PROFILE.excludeProviders);
+const WALKER_NEVER_RE_SRC = SSO_NEVER_SRC
+  ? `${NEVER_CLICK_REGEX.source}|${SSO_NEVER_SRC}`
+  : NEVER_CLICK_REGEX.source;
 // ── mutation guard (spec-15) — block WRITE requests at the wire ────────────
 // The HTTP method is a deterministic destructiveness signal the button label
 // isn't. We let reads through (the crawl needs them to load data) and ABORT
@@ -813,12 +829,14 @@ const _IDP_RE = EXTERNAL_IDP_RE;
 async function persistSession(page, say = console.log.bind(console)) {
   try {
     const fresh = await page.context().storageState({ indexedDB: true });
-    const material = (st) => (st?.cookies?.length || 0) +
-      (st?.origins || []).reduce((n, o) => n + (o.localStorage?.length || 0), 0);
-    if (material(fresh) === 0) return;
+    // shouldPersist counts IndexedDB records too — the old inline check
+    // (cookies + localStorage only) refused to persist pure-IndexedDB
+    // sessions (Firebase Auth), so their rotations were never saved.
+    const verdict = shouldPersist(fresh, authState);
+    if (!verdict.ok) { say(`[auth] not persisting session capture — ${verdict.reason}`); return; }
     authState = fresh;
     fs.writeFileSync(AUTH_STATE, JSON.stringify(fresh));
-    say(`[auth] re-saved rotated session → auth-state.json (${(fresh.cookies || []).length} cookies)`);
+    say(`[auth] re-saved rotated session → auth-state.json (${(fresh.cookies || []).length} cookies, material=${totalMaterial(fresh)})`);
   } catch (e) { say(`[auth] could not re-save session: ${e.message}`); }
 }
 
@@ -981,6 +999,7 @@ if (CRAWL_DISABLED) {
   console.log(`[crawl]   safe:        /${SAFE_CLICK_REGEX.source}/i`);
   console.log(`[crawl]   destructive (flag, still clicked): /${DESTRUCTIVE_CLICK_REGEX.source}/i`);
   console.log(`[crawl]   never-click (session-breakers, skipped): /${NEVER_CLICK_REGEX.source}/i`);
+  if (SSO_NEVER_SRC) console.log(`[crawl]   never-click (SSO provider buttons, skipped): ${AUTH_PROFILE.excludeProviders.join(', ')}`);
   console.log(`[crawl]   max-clicks-per-page=${SAFE_CLICK_MAX_PER_PAGE === Infinity ? 'unbounded' : SAFE_CLICK_MAX_PER_PAGE}  max-depth=${MAX_INTERACT_DEPTH}  max-pages=${MAX_INTERACT_PAGES}  budget=${Math.round(CRAWL_BUDGET_MS/1000)}s`);
 
   const serialized = await runWalkerPool({
@@ -989,7 +1008,11 @@ if (CRAWL_DISABLED) {
     sameOrigin,
     safeRe:  SAFE_CLICK_REGEX.source,
     destrRe: DESTRUCTIVE_CLICK_REGEX.source,
-    neverRe: NEVER_CLICK_REGEX.source,
+    neverRe: WALKER_NEVER_RE_SRC,
+    // Post-click safety net for SSO buttons the label regex missed: a click
+    // that lands on a known external IdP is recorded as an issue and never
+    // enqueued (see worker.mjs).
+    idpRe: EXTERNAL_IDP_RE.source,
     maxClicksPerPage: SAFE_CLICK_MAX_PER_PAGE,
     maxDepth: MAX_INTERACT_DEPTH,
     maxPages: MAX_INTERACT_PAGES,
@@ -1013,6 +1036,26 @@ if (CRAWL_DISABLED) {
     // pick up the freshest state.
     storageStateProvider: () => authState,
 
+    // Internal-CA targets (auth-profile.json ignoreHTTPSErrors / env
+    // CRAWL_IGNORE_HTTPS_ERRORS=1): accept the target's self-signed chain.
+    contextOptions: AUTH_PROFILE.ignoreHTTPSErrors ? { ignoreHTTPSErrors: true } : {},
+
+    // ── session keeper (proactive refresh + broadcast) ─────────────────
+    // When auth-profile.json declares a TTL, the pool re-warms the session
+    // at ~refreshAtFraction of it (default 50%) — on short-TTL apps this
+    // turns "constantly recovering" into "never bounced". The keeper page
+    // rides the same single-flight recovery chain as everything else, and
+    // recoverSession persists the rotated state into `authState`, which is
+    // what the pool broadcasts to the live worker contexts. Also runs on
+    // demand when workers hit a recovery storm (state.requestSessionRefresh).
+    sessionRefresh: authState ? {
+      intervalMs: refreshIntervalMs(AUTH_PROFILE),
+      refresh: async (page) => {
+        const ok = await serializedRecover(() => recoverSession(page, `${BASE_URL}${SEED_PATH}`, console));
+        return ok ? authState : null;
+      },
+    } : null,
+
     // Auth warm-up: when we have a saved session, bring up ONE context first
     // (it completes the silent-SSO handshake serially), then fan out the rest
     // seeded with the resulting session — avoids the parallel refresh race.
@@ -1026,13 +1069,11 @@ if (CRAWL_DISABLED) {
       // hold ZERO records (Firebase keeps the signed-in user as a record in
       // firebaseLocalStorageDb), and every later run bounces straight back to
       // /login. Guard: never replace state that has storage-side session
-      // material with a capture that has none.
-      const sessionMaterial = (st) => (st?.origins || []).reduce((n, o) =>
-        n + (o.localStorage?.length || 0) +
-        (o.indexedDB || []).reduce((m, db) =>
-          m + (db.stores || []).reduce((k, s) => k + (s.records?.length || 0), 0), 0), 0);
-      if (sessionMaterial(fresh) === 0 && sessionMaterial(authState) > 0) {
-        console.warn('[auth] warm-up capture carries no session material (0 localStorage/IndexedDB records) — keeping the existing auth-state.json');
+      // material with a capture that has none (shouldPersist, shared with
+      // persistSession and the harvest-token save guard).
+      const verdict = shouldPersist(fresh, authState);
+      if (!verdict.ok) {
+        console.warn(`[auth] warm-up capture not adopted — ${verdict.reason}; keeping the existing auth-state.json`);
         return;
       }
       authState = fresh;                                  // fan-out workers now inject the LIVE token
@@ -1071,14 +1112,15 @@ if (CRAWL_DISABLED) {
       if (/\/(login|signin|sign-in)\b/i.test(page.url())) {
         const ok = await ensureInteractiveLogin();
         if (ok) {
-          // Cookie-based sessions can be adopted mid-run; IndexedDB-based ones
-          // (Firebase) can only be injected at context creation — this worker
-          // stays unauthenticated for THIS run, but the state is saved so the
-          // NEXT run starts fully logged in (via storageStateProvider).
-          if (!(authState.cookies?.length)) {
-            console.warn(`[interact] w${workerId} manual login saved, but the session is IndexedDB-based — cannot adopt it into a live context. Re-run the scan; it will start authenticated.`);
-          }
-          try { await page.context().addCookies(authState.cookies || []); } catch {}
+          // Adopt the minted session into THIS live context: cookies via
+          // addCookies, localStorage/IndexedDB records via in-page injection
+          // (best-effort — the app's login shell already created the schema,
+          // we only refresh the records). Mid-crawl bounces that still slip
+          // through get the full treatment via the worker's
+          // 'recreate-context' path.
+          await broadcastSessionToContext(page.context(), authState, {
+            log: (m) => console.warn(`[interact] w${workerId} session adoption: ${m}`),
+          });
           await page.goto(`${BASE_URL}${SEED_PATH}`, { waitUntil: 'domcontentloaded' }).catch(() => {});
           await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
           await waitForUrlStable(page).catch(() => {});
@@ -1100,12 +1142,21 @@ if (CRAWL_DISABLED) {
       const recovered = authState
         ? await serializedRecover(() => recoverSession(page, intendedUrl, console))
         : false;
-      if (!recovered && await maybeLogin(page, console)) {
+      if (recovered) return true;
+      if (await maybeLogin(page, console)) {
         await persistSession(page);
         // maybeLogin lands on the app's default page — put this worker back
         // on the route it was actually trying to crawl.
         if (intendedUrl) await page.goto(intendedUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
+        return true;
       }
+      // Last resort: interactive login (visible browser, once per crawl).
+      // The minted session may be IndexedDB-based, which can't be injected
+      // into THIS live context — tell the worker to recreate its context
+      // (storageStateProvider serves the fresh authState at creation), which
+      // adopts the session in full.
+      if (await ensureInteractiveLogin()) return 'recreate-context';
+      return false;
     },
 
     // Hook into the existing per-page snapshot writer (forms, links,

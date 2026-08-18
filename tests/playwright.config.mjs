@@ -59,6 +59,13 @@ export default defineConfig({
   use: {
     baseURL: detectBaseUrl(),
     storageState: fs.existsSync(AUTH_STATE) ? AUTH_STATE : undefined,
+    // Internal-CA targets (auth-profile.json ignoreHTTPSErrors or env
+    // CRAWL_IGNORE_HTTPS_ERRORS=1) — same knob the crawler honors.
+    ignoreHTTPSErrors: (() => {
+      if (process.env.CRAWL_IGNORE_HTTPS_ERRORS !== undefined) return process.env.CRAWL_IGNORE_HTTPS_ERRORS === '1';
+      try { return !!JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'auth-profile.json'), 'utf8')).ignoreHTTPSErrors; }
+      catch { return false; }
+    })(),
     screenshot: 'only-on-failure',
     trace: 'retain-on-failure',
   },

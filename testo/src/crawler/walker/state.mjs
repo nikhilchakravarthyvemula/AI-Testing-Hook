@@ -21,6 +21,10 @@ export class SharedState {
   // (a novelty signal consumed by recordSample; private — internal bookkeeping)
   #newTplByPage = new Map();
   #satLoggedTpl = new Set();
+  // auth-recovery storm detector + outage detector (private ring buffers)
+  #recoveryHits = [];
+  #netErrTimes = [];
+  #outageProber = null;
 
   constructor({ seeds = [], budgetMs = 600_000, maxPages = 200, maxDepth = 5,
                 maxTaskAttempts = 2, skipRoutes = null,
@@ -67,6 +71,25 @@ export class SharedState {
 
     this.activeWorkers    = 0;
 
+    // ── auth accounting ─────────────────────────────────────────────────
+    // authRecoveries > 0 → a worker (or the keeper) is mid-recovery on the
+    // single-flight token chain; siblings back off instead of piling onto
+    // the refresh endpoint with soon-to-be-stale tokens.
+    this.authRecoveries   = 0;
+    this.authEvents       = [];   // [{ts, type, workerId?, durationMs?, message?}]
+    // Wall-clock spent NOT crawling (auth recovery, network outage) — excluded
+    // from the time budget so a slow SSO round-trip or a VPN blip doesn't eat
+    // the crawl's allowance (TTL-aware budget accounting).
+    this.budgetPausedMs   = 0;
+    // Set by the pool when session refresh is configured: (reason) → Promise.
+    // Workers call it on a recovery storm (mid-crawl warm-up + broadcast).
+    this.requestSessionRefresh = null;
+
+    // ── network-outage detection ────────────────────────────────────────
+    this.outageSince      = null;   // epoch ms while an outage is active
+    this.outageCount      = 0;
+    this.outageTotalMs    = 0;
+
     // Seed filtering last — #skips records issues, so every field above
     // (issues in particular) must already be initialized.
     for (const s of seeds) {
@@ -93,10 +116,85 @@ export class SharedState {
   // budgetMs <= 0 means UNBOUNDED time: the crawl runs until the frontier
   // drains (or the pages cap fires). Time is a failsafe, not the goal —
   // the stopping criterion for whole-app coverage is frontier closure.
+  // budgetPausedMs (auth recovery, outages) is excluded: the budget bounds
+  // CRAWLING time, and charging a 75s SSO round-trip or a VPN blip against
+  // it silently converts auth trouble into truncated coverage.
   isBudgetExhausted() {
-    if (this.budgetMs > 0 && Date.now() - this.startedAt > this.budgetMs) return 'time';
+    const crawlElapsed = Date.now() - this.startedAt - this.budgetPausedMs;
+    if (this.budgetMs > 0 && crawlElapsed > this.budgetMs) return 'time';
     if (this.interactedUrls.size >= this.maxPages) return 'pages';
     return null;
+  }
+
+  // ── auth recovery accounting ──────────────────────────────────────────
+  beginAuthRecovery() { this.authRecoveries += 1; }
+  endAuthRecovery()   { this.authRecoveries = Math.max(0, this.authRecoveries - 1); }
+  get authRecoveryActive() { return this.authRecoveries > 0; }
+
+  recordAuthEvent({ type, workerId = null, durationMs = null, message = '' }) {
+    if (!type) return;
+    this.authEvents.push({
+      ts: Date.now() - this.startedAt,
+      type, workerId, durationMs,
+      message: String(message).split('\n')[0].slice(0, 200),
+    });
+  }
+
+  addBudgetPause(ms) { if (Number.isFinite(ms) && ms > 0) this.budgetPausedMs += ms; }
+
+  // Recovery-storm detector: returns how many re-auth hits landed inside the
+  // window INCLUDING this one. ≥2 means the shared session is stale for
+  // everyone — per-context recovery would serialize N slow round-trips, so
+  // the caller should trigger ONE session refresh + broadcast instead.
+  noteRecoveryHit(windowMs = 60_000) {
+    const now = Date.now();
+    this.#recoveryHits.push(now);
+    while (this.#recoveryHits.length && now - this.#recoveryHits[0] > windowMs) {
+      this.#recoveryHits.shift();
+    }
+    return this.#recoveryHits.length;
+  }
+
+  // ── network-outage detection ──────────────────────────────────────────
+  // N goto-level network errors across workers within a short window means
+  // the NETWORK died, not the pages — retrying just burns each task's
+  // attempt budget against a dead link. The frontier pauses (workers hold),
+  // one worker probes until the target answers again, and paused time is
+  // excluded from the crawl budget.
+  reportNetworkError({ threshold = 3, windowMs = 30_000 } = {}) {
+    const now = Date.now();
+    this.#netErrTimes.push(now);
+    while (this.#netErrTimes.length && now - this.#netErrTimes[0] > windowMs) {
+      this.#netErrTimes.shift();
+    }
+    if (!this.outageSince && this.#netErrTimes.length >= threshold) {
+      this.outageSince = now;
+      this.outageCount += 1;
+      this.recordIssue({ type: 'network-outage', message: `${this.#netErrTimes.length} network errors in ${Math.round(windowMs / 1000)}s — frontier paused` });
+      return true;   // this call flipped the outage on
+    }
+    return false;
+  }
+
+  reportNetworkOk() {
+    if (this.outageSince) {
+      const dur = Date.now() - this.outageSince;
+      this.outageTotalMs += dur;
+      this.addBudgetPause(dur);
+      this.recordIssue({ type: 'network-restored', message: `outage over after ${Math.round(dur / 1000)}s — frontier resumed` });
+      this.outageSince = null;
+      this.#outageProber = null;
+    }
+    this.#netErrTimes.length = 0;
+  }
+
+  get outageActive() { return this.outageSince != null; }
+
+  // Exactly one worker probes connectivity during an outage; the rest wait.
+  tryBecomeOutageProber(workerId) {
+    if (this.#outageProber != null && this.#outageProber !== workerId) return false;
+    this.#outageProber = workerId;
+    return true;
   }
 
   // Deliberate route exclusion (CRAWL_SKIP_ROUTES) — recorded once per URL
@@ -146,6 +244,16 @@ export class SharedState {
     }
     this.interactedUrls.delete(task.url);
     this.pending.push({ ...task, attempts });
+    return true;
+  }
+
+  // Requeue WITHOUT charging an attempt — for failures that aren't the
+  // task's fault (network outage): the page never answered, so burning the
+  // 2-attempt budget would abandon perfectly good routes on a dead link.
+  requeueNoCharge(task) {
+    if (!task || !task.url) return false;
+    this.interactedUrls.delete(task.url);
+    this.pending.push({ ...task });
     return true;
   }
 
@@ -305,6 +413,19 @@ export class SharedState {
       pendingCount: this.pending.length,
       edgeCounts: { total: this.clickGraph.length, nav: navEdges, state: stateEdges },
       issueCounts,
+      // Auth observability: when a scan misbehaves, this section says whether
+      // auth was the reason (recovery churn, token rotations, storms) without
+      // grepping logs. budgetPausedMs is the wall-clock excluded from the
+      // time budget (auth recovery + outages).
+      auth: (() => {
+        const counts = {}, totalMs = {};
+        for (const e of this.authEvents) {
+          counts[e.type] = (counts[e.type] || 0) + 1;
+          if (e.durationMs) totalMs[e.type] = (totalMs[e.type] || 0) + e.durationMs;
+        }
+        return { counts, totalMs, budgetPausedMs: this.budgetPausedMs, events: this.authEvents };
+      })(),
+      outages: { count: this.outageCount, totalMs: this.outageTotalMs, active: this.outageActive },
       nodes: [...this.interactedUrls],
       skippedRoutes: [...this.skippedUrls],
       // Route templates visited, with instance counts — the coverage unit.

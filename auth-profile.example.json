@@ -1,0 +1,20 @@
+{
+  "_comment": "Copy to auth-profile.json (or point AUTH_PROFILE at it). Per-target auth behavior — every stage (scan/harvest/generate/execute) reads this. All fields optional; env overrides: AUTH_TTL_SECONDS, AUTH_REFRESH_AT_FRACTION, EXCLUDE_SSO_PROVIDERS, CRAWL_IGNORE_HTTPS_ERRORS, LOGIN_PATH.",
+
+  "_loginPath": "Route hosting the app's own login form. Default: SEED_PATH (the seed is expected to bounce there).",
+  "loginPath": "/login",
+
+  "_formFirst": "Try the plain email/password form before any 'Sign in with <provider>' button (popup-based OAuth stalls headless).",
+  "formFirst": true,
+
+  "_ttlSeconds": "Session/access-token TTL estimate. Declaring it turns on the PROACTIVE session keeper: refresh + broadcast to all workers at ttlSeconds * refreshAtFraction. For a <2-min-TTL app set e.g. 110.",
+  "ttlSeconds": 900,
+
+  "refreshAtFraction": 0.5,
+
+  "_excludeProviders": "SSO provider buttons the walker must never click (each click redirects to the IdP and can rotate/poison auth state). Omit for the built-in list; [] disables.",
+  "excludeProviders": ["google", "microsoft", "okta", "sso"],
+
+  "_ignoreHTTPSErrors": "Accept internally-signed certs (internal CAs) in every browser context: crawler, harvest, login, ensure-fresh, Playwright execute.",
+  "ignoreHTTPSErrors": false
+}

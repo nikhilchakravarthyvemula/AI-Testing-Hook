@@ -26,6 +26,7 @@ import path from 'node:path';
 import { SharedState }          from './state.mjs';
 import { runWorker, isDeadPage } from './worker.mjs';
 import { scanInteractables }    from './scanner.mjs';
+import { broadcastSessionToContext } from './inject-storage.mjs';
 
 /**
  * @param {Object} opts
@@ -57,6 +58,7 @@ export async function runWalkerPool(opts) {
     safeRe,
     destrRe,
     neverRe,
+    idpRe = null,          // external-IdP host regex source (post-click SSO safety net)
     maxClicksPerPage = Infinity,
     maxListItemsPerNav,        // worker.mjs has its own default
     maxDepth = 5,
@@ -74,6 +76,17 @@ export async function runWalkerPool(opts) {
     // only via browser.newContext({ storageState }). A provider (not a plain
     // value) so post-warm-up rotations are picked up by later contexts.
     storageStateProvider = null,
+    // Extra options for EVERY context this pool creates (workers, keeper,
+    // discovery). Used for ignoreHTTPSErrors on internally-signed targets.
+    contextOptions = {},
+    // ── mid-crawl session keeper ──
+    // { intervalMs, refresh } — refresh(page) drives a keeper page through
+    // the target's silent-refresh flow and returns the fresh storageState
+    // (or null on failure). The pool then BROADCASTS that state (cookies +
+    // localStorage + IndexedDB) into every live worker context. Runs
+    // proactively every intervalMs (TTL-aware; null = reactive only) and on
+    // demand via state.requestSessionRefresh (recovery storms).
+    sessionRefresh = null,
     reAuth,
     recordPage,
     apiNoveltyFor = null,  // (pageUrl) → count of first-seen API templates (novelty signal)
@@ -135,10 +148,10 @@ export async function runWalkerPool(opts) {
   // + IndexedDB). Falls back to a bare context when there's no saved state.
   const newSeededContext = async () => {
     const ss = storageStateProvider?.();
-    try { return await browser.newContext(ss ? { storageState: ss } : {}); }
+    try { return await browser.newContext({ ...contextOptions, ...(ss ? { storageState: ss } : {}) }); }
     catch (e) {
       log(`[walker-pool] storageState injection failed (${e.message.split('\n')[0]}) — starting context unauthenticated`);
-      return browser.newContext();
+      return browser.newContext({ ...contextOptions });
     }
   };
 
@@ -296,6 +309,61 @@ export async function runWalkerPool(opts) {
     return page;
   };
 
+  // ── SESSION KEEPER — proactive refresh + broadcast ────────────────────
+  // With a rotating single-use refresh token, ONE party must own rotation.
+  // The keeper context refreshes the session (proactively at the TTL-aware
+  // interval, or on demand when workers hit a recovery storm) and the fresh
+  // state is broadcast into every live worker context — cookies via
+  // addCookies, localStorage/IndexedDB via in-page injection. While it runs,
+  // authRecoveryActive holds the workers (loop-top backoff), so no worker
+  // navigates with a token that's mid-rotation.
+  let refreshTimer = null;
+  let refreshInFlight = null;
+  const runSessionRefresh = (reason) => {
+    if (!sessionRefresh?.refresh) return Promise.resolve(false);
+    if (refreshInFlight) return refreshInFlight;   // single-flight
+    refreshInFlight = (async () => {
+      const t0 = Date.now();
+      state.beginAuthRecovery();
+      let keeper = null;
+      try {
+        log(`[walker-pool] session refresh (${reason}) — keeper context warming`);
+        keeper = await newSeededContext();
+        const page = await keeper.newPage();
+        const fresh = await sessionRefresh.refresh(page);
+        if (!fresh) {
+          state.recordAuthEvent({ type: 'refresh-failed', durationMs: Date.now() - t0, message: reason });
+          log(`[walker-pool] session refresh (${reason}) did not produce a session — workers keep their current state`);
+          return false;
+        }
+        let broadcastOk = 0;
+        for (const slot of contexts) {
+          if (await broadcastSessionToContext(slot.ctx, fresh, { log: (m) => log(`[walker-pool] w${slot.workerId} ${m}`) })) broadcastOk++;
+        }
+        state.recordAuthEvent({ type: 'session-refresh', durationMs: Date.now() - t0, message: `${reason}; broadcast to ${broadcastOk}/${contexts.length} context(s)` });
+        log(`[walker-pool] session refreshed (${reason}) in ${Math.round((Date.now() - t0) / 1000)}s — broadcast to ${broadcastOk}/${contexts.length} live context(s)`);
+        return true;
+      } catch (e) {
+        state.recordAuthEvent({ type: 'refresh-failed', durationMs: Date.now() - t0, message: `${reason}: ${e.message}` });
+        log(`[walker-pool] session refresh (${reason}) failed: ${e.message.split('\n')[0]}`);
+        return false;
+      } finally {
+        await keeper?.close().catch(() => {});
+        state.endAuthRecovery();
+        state.addBudgetPause(Date.now() - t0);   // keeper time is auth time, not crawl time
+        refreshInFlight = null;
+      }
+    })();
+    return refreshInFlight;
+  };
+  if (sessionRefresh?.refresh) {
+    state.requestSessionRefresh = runSessionRefresh;   // workers trigger on recovery storms
+    if (sessionRefresh.intervalMs > 0) {
+      refreshTimer = setInterval(() => { runSessionRefresh('proactive-ttl').catch(() => {}); }, sessionRefresh.intervalMs);
+      log(`[walker-pool] proactive session refresh every ${Math.round(sessionRefresh.intervalMs / 1000)}s (TTL-aware)`);
+    }
+  }
+
   // ── BRING WORKERS UP ──────────────────────────────────────────────────
   // Staggered when auth is involved (so their first loads don't collide on the
   // silent-refresh endpoint); plain-parallel when there's no auth.
@@ -333,7 +401,7 @@ export async function runWalkerPool(opts) {
   const promises = contexts.map(({ page, workerId }) =>
     runWorker({
       workerId, state, page,
-      sameOrigin, safeRe, destrRe, neverRe,
+      sameOrigin, safeRe, destrRe, neverRe, idpRe,
       maxClicksPerPage, maxListItemsPerNav, postNavWaitMs,
       log, recordPage, reAuth,
       scannerFn, recreatePage, apiNoveltyFor,
@@ -347,6 +415,9 @@ export async function runWalkerPool(opts) {
 
   // ── teardown ──────────────────────────────────────────────────────────
   if (checkpointTimer) { clearInterval(checkpointTimer); }
+  if (refreshTimer)    { clearInterval(refreshTimer); }
+  state.requestSessionRefresh = null;
+  if (refreshInFlight) { await refreshInFlight.catch(() => {}); }
   await browser.close().catch(() => {});
 
   const exhausted = state.isBudgetExhausted();

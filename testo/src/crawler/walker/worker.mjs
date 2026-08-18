@@ -60,6 +60,11 @@ const IDLE_GRACE_MS = 750;
 // worker recreates its page instead of consuming the whole queue with a
 // corpse. Matches Playwright's crash/closure message family.
 const DEAD_PAGE_RE = /page crashed|target crashed|target closed|has been closed|browser has been disconnected|session closed/i;
+
+// Connection-level (not HTTP-level) Chromium network errors — the signature
+// of a dead link/VPN, not a broken page. Playwright goto timeouts are NOT
+// included: a slow page is still an answering page.
+const NETWORK_ERR_RE = /net::ERR_(?:INTERNET_DISCONNECTED|NAME_NOT_RESOLVED|NAME_RESOLUTION_FAILED|CONNECTION_REFUSED|CONNECTION_RESET|CONNECTION_CLOSED|CONNECTION_TIMED_OUT|CONNECTION_ABORTED|ADDRESS_UNREACHABLE|NETWORK_CHANGED|NETWORK_ACCESS_DENIED|PROXY_CONNECTION_FAILED|TUNNEL_CONNECTION_FAILED|EMPTY_RESPONSE)\b/i;
 export function isDeadPage(page, err) {
   try { if (page.isClosed()) return true; } catch { return true; }
   return DEAD_PAGE_RE.test(err?.message || '');
@@ -102,6 +107,7 @@ export async function runWorker(opts) {
     safeRe,
     destrRe,
     neverRe,
+    idpRe,        // optional: external-IdP host regex source — post-click SSO safety net
     maxClicksPerPage = Infinity,
     maxListItemsPerNav = DEFAULT_MAX_LIST_ITEMS,
     postNavWaitMs = 1500,
@@ -115,10 +121,51 @@ export async function runWorker(opts) {
   // Reassignable: replaced with a fresh page when the renderer crashes.
   let { page } = opts;
 
+  // Pre-click filtering rejects "Sign in with <provider>" buttons by label
+  // (never-click merge in crawl.mjs); this regex is the POST-click safety net
+  // for the ones the label heuristic can't see (icon-only buttons, unusual
+  // wording): a click that lands on a known IdP is flagged as an issue so
+  // auth-state poisoning has a paper trail, and the re-baseline goto below
+  // already brings the worker straight back.
+  const idpRegex = idpRe ? new RegExp(idpRe, 'i') : null;
+
   let myActive = false;
   let idleSince = null;
 
   while (!state.isBudgetExhausted()) {
+    // ── outage hold ─────────────────────────────────────────────────────
+    // The network is down (N goto failures across workers in a short
+    // window). Dequeuing would just burn attempt budgets against a dead
+    // link — hold the frontier. ONE worker probes the origin until it
+    // answers; the rest wait. Outage time is excluded from the crawl
+    // budget by reportNetworkOk().
+    if (state.outageActive) {
+      if (myActive) { state.endWork(); myActive = false; }
+      idleSince = null;
+      if (sameOrigin && state.tryBecomeOutageProber(workerId)) {
+        try {
+          await page.goto(sameOrigin, { waitUntil: 'domcontentloaded', timeout: 10_000 });
+          state.reportNetworkOk();
+          log(`[w${workerId}] network restored — resuming frontier`);
+        } catch { await wait(3_000); }
+      } else {
+        await wait(1_000);
+      }
+      continue;
+    }
+
+    // ── auth-aware backoff ──────────────────────────────────────────────
+    // A sibling (or the session keeper) is mid-recovery on the single-
+    // flight token chain. Starting a task now means navigating with a
+    // token that's about to rotate — the task would bounce to /login and
+    // pile onto the same recovery chain. Hold until the recovery ends.
+    if (state.authRecoveryActive) {
+      if (myActive) { state.endWork(); myActive = false; }
+      idleSince = null;
+      await wait(300);
+      continue;
+    }
+
     const task = state.tryDequeue();
 
     // ── nothing to do ───────────────────────────────────────────────────
@@ -208,9 +255,49 @@ export async function runWorker(opts) {
       if (/\/(login|signin|sign-in|sso|auth)\b/i.test(page.url()) && reAuth) {
         log(`[w${workerId}] /login redirect — re-authenticating`);
         state.recordIssue({ type: 're-auth', workerId, url, message: `landed at ${page.url()}` });
-        // Pass the intended route so reAuth can re-navigate to IT (not the
-        // login page) once the SSO refresh-cookie token settles.
-        await reAuth(page, url).catch(e => { log(`[w${workerId}] re-auth failed: ${e.message}`); state.recordIssue({ type: 're-auth-failed', workerId, url, message: e.message }); });
+
+        // Recovery storm (mid-crawl warm-up): a second bounce inside the
+        // window means the SHARED session is stale for every context — N
+        // per-context recoveries would serialize N slow SSO round-trips.
+        // Ask the pool for ONE keeper refresh + broadcast instead, then
+        // re-try the route before falling back to per-context recovery.
+        if (state.requestSessionRefresh && state.noteRecoveryHit() >= 2) {
+          log(`[w${workerId}] recovery storm — requesting shared session refresh + broadcast`);
+          await state.requestSessionRefresh('recovery-storm').catch(() => {});
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+          await page.waitForLoadState('load', { timeout: 4_000 }).catch(() => {});
+        }
+
+        if (/\/(login|signin|sign-in|sso|auth)\b/i.test(page.url())) {
+          // Pass the intended route so reAuth can re-navigate to IT (not the
+          // login page) once the SSO refresh-cookie token settles. While this
+          // runs, authRecoveryActive makes sibling workers hold (see loop top),
+          // and the recovery time is excluded from the crawl budget.
+          const t0 = Date.now();
+          state.beginAuthRecovery();
+          let verdict = null;
+          try {
+            verdict = await reAuth(page, url);
+          } catch (e) {
+            log(`[w${workerId}] re-auth failed: ${e.message}`);
+            state.recordIssue({ type: 're-auth-failed', workerId, url, message: e.message });
+          } finally {
+            const dur = Date.now() - t0;
+            state.endAuthRecovery();
+            state.addBudgetPause(dur);
+            state.recordAuthEvent({ type: 're-auth', workerId, durationMs: dur, message: url });
+          }
+          // 'recreate-context' → an interactive login minted a NEW session
+          // whose material lives in IndexedDB, which can only be injected at
+          // context creation. Swap this worker onto a fresh context seeded
+          // from the new auth-state and re-land on the intended route.
+          if (verdict === 'recreate-context' && recreatePage) {
+            log(`[w${workerId}] adopting new session via context recreation`);
+            page = await recreatePage(workerId);
+            state.recordAuthEvent({ type: 'context-recreated', workerId, message: 'adopted interactive-login session' });
+            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+          }
+        }
         await page.waitForLoadState('load', { timeout: 4_000 }).catch(() => {});
         // If recovery landed us back on the real route, let its content +
         // table rows settle before scanning (recovery did a fresh goto).
@@ -482,7 +569,12 @@ export async function runWorker(opts) {
                 log(`[w${workerId}]       ↳ NEW page discovered: ${cleanedAfter}  (queued at depth ${depth + 1})`);
               }
             } else if (!sameOriginNav) {
-              log(`[w${workerId}]       ↳ cross-origin nav (not queued): ${cleanedAfter}`);
+              if (idpRegex && idpRegex.test(cleanedAfter)) {
+                state.recordIssue({ type: 'sso-redirect', workerId, url, message: `"${display}" → ${cleanedAfter.slice(0, 120)} (IdP; not queued — add its label to EXCLUDE_SSO_PROVIDERS)` });
+                log(`[w${workerId}]       ↳ ⚠ click landed on an external IdP (not queued): ${cleanedAfter}`);
+              } else {
+                log(`[w${workerId}]       ↳ cross-origin nav (not queued): ${cleanedAfter}`);
+              }
             }
             // Re-baseline this worker on the original task URL so the
             // next click in the loop starts from the right page. Content-
@@ -543,6 +635,22 @@ export async function runWorker(opts) {
       if (!novel) log(`[w${workerId}]   sample dry (no novelty for template)`);
     } catch (e) {
       const dead = isDeadPage(page, e);
+
+      // Connection-level failure (VPN drop, target restart, DNS death) — the
+      // page never answered, so this is not the task's fault. Requeue WITHOUT
+      // charging an attempt and feed the outage detector; when enough of
+      // these land in a short window the frontier pauses (see loop top)
+      // instead of retry-burning every queued route against a dead link.
+      if (!dead && NETWORK_ERR_RE.test(e.message || '')) {
+        log(`[w${workerId}] network error on ${url} — ${e.message.split('\n')[0].slice(0, 100)}`);
+        state.recordIssue({ type: 'network-error', workerId, url, message: e.message });
+        state.requeueNoCharge(task);
+        if (state.reportNetworkError()) {
+          log(`[w${workerId}] network outage detected — frontier paused until the origin answers again`);
+        }
+        continue;
+      }
+
       log(`[w${workerId}] task failed: ${url} — ${e.message.split('\n')[0].slice(0, 120)}`);
       state.recordIssue({ type: dead ? 'page-crashed' : 'task-failed', workerId, url, message: e.message });
 
