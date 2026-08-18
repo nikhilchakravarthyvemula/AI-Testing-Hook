@@ -39,6 +39,7 @@ const FEATURE_ENTRY = path.join(REPO_ROOT, 'context-layer', 'feature-extractor',
 const FEATURE_SLICE_ENTRY = path.join(REPO_ROOT, 'generation-layer', 'feature-slice', 'resolve.mjs');
 const E2E_GEN_ENTRY = path.join(REPO_ROOT, 'testo', 'src', 'crawler', 'generator', 'e2e.mjs');
 const HARVEST_TOKEN_ENTRY = path.join(REPO_ROOT, 'testo', 'src', 'crawler', 'harvest-token.mjs');
+const ENSURE_AUTH_ENTRY = path.join(REPO_ROOT, 'testo', 'src', 'crawler', 'auth', 'ensure-fresh.mjs');
 const PW_CONFIG = path.join(REPO_ROOT, 'tests', 'playwright.config.mjs');
 const PW_BIN = path.join(REPO_ROOT, 'node_modules', '.bin', 'playwright');
 const GEN_DIR = path.join(OUT, 'generation');
@@ -524,6 +525,20 @@ function runHarvestToken(baseUrl) {
   return runNode(HARVEST_TOKEN_ENTRY, env, 'harvest-token');
 }
 
+// ── auth pre-flight: renew a stale saved session BEFORE a stage runs ─────────
+// One shared staleness check (auth/ensure-fresh.mjs) instead of each stage
+// discovering the dead session its own way (harvest captures nothing, specs
+// 401, curls fall back to unauthenticated). Best-effort: a non-zero exit means
+// "couldn't renew", not "don't run" — the stage proceeds and its own recovery
+// paths still apply.
+async function runEnsureFreshAuth(baseUrl, label) {
+  const env = { ...process.env };
+  if (baseUrl) env.BASE_URL = baseUrl;
+  const code = await runNode(ENSURE_AUTH_ENTRY, env, `ensure-auth:${label}`);
+  if (code !== 0) log(`[ctx] ⚠ session renewal failed — ${label} may run unauthenticated`);
+  return code;
+}
+
 // ── UI test generation + execution (Playwright) ──────────────────────────────
 // The UI half of the hybrid. e2e.mjs writes specs from the crawler's
 // click-graph + routes (codebase optional); Playwright runs them authenticated
@@ -1006,6 +1021,12 @@ async function cmdGenerate(opts) {
   const mode = normMode(opts.mode);
   openLog(runId);
 
+  // Auth pre-flight: generation itself is offline, but generators read the
+  // freshest observed request data and the very next step is usually execute —
+  // renewing here means the whole generate→execute window works off one live
+  // session instead of discovering staleness mid-execute.
+  if (opts.url) await runEnsureFreshAuth(opts.url, 'generate');
+
   // Hybrid: write BOTH suites, run NEITHER. API curls + Playwright specs.
   const { code, result } = await runSkill(
     { execute: 'false', test_mode: mode, base_url: opts.url || null, max_tests: opts.maxTests || null }, 'generate');
@@ -1079,7 +1100,9 @@ async function cmdExecute(opts) {
   const perfEnabled = (scen.scenarios.perf || []).filter((s) => s.enabled);
   log(`[scenarios] plan: api ${scen.counts.api.total - disabledApi.length}/${scen.counts.api.total} · ui ${uiScen.length - disabledUi.length}/${uiScen.length} · perf ${perfEnabled.length}/${scen.counts.perf.total} enabled (${path.relative(REPO_ROOT, SCENARIOS_FILE)})`);
 
-  // ── auth: harvest a live bearer BEFORE either suite runs (best-effort) ────
+  // ── auth: renew the saved session, then harvest a live bearer BEFORE either
+  // suite runs (both best-effort) ───────────────────────────────────────────
+  if (opts.url) await runEnsureFreshAuth(opts.url, 'execute');
   const harvestCode = await runHarvestToken(opts.url);
   if (harvestCode !== 0) log('[ctx] no bearer harvested — authenticated API tests may 401 (unauthenticated fallback)');
 
