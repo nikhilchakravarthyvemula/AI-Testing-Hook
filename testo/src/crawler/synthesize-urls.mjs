@@ -38,6 +38,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { effectiveParts } from './lib/route-key.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
@@ -101,9 +102,13 @@ const pages = [...ndjson(path.join(RAW_DIR, 'pages.ndjson'))];
 // (network request) is NOT a crawl — those pages were never explored — so we
 // compare against pages.ndjson finalUrl/requestedUrl, not the raw request log.
 function normKey(urlStr) {
-  let u; try { u = new URL(urlStr); } catch { return urlStr; }
-  const ps = [...u.searchParams].filter(([k]) => !NOISE_PARAMS.test(k)).sort();
-  return u.origin + u.pathname + (ps.length ? '?' + ps.map(([k, v]) => `${k}=${v}`).join('&') : '');
+  // Hash-SPA aware: for '#/'-routed URLs the route (and its query) live in
+  // the fragment — pathname-only keys would collapse every hash route into
+  // one and mark all synthesized URLs as already-crawled.
+  const ep = effectiveParts(urlStr);
+  if (!ep) return urlStr;
+  const ps = [...new URLSearchParams(ep.search)].filter(([k]) => !NOISE_PARAMS.test(k)).sort();
+  return ep.origin + ep.path + (ps.length ? '?' + ps.map(([k, v]) => `${k}=${v}`).join('&') : '');
 }
 const crawledKeys = new Set();
 for (const p of pages) {
@@ -148,6 +153,24 @@ function addPathTemplate(origin, segs, segIndex, shape, exampleId, exampleUrl) {
   if (!t) { t = { kind: 'path', origin, pathTemplate, segIndex, shape, seg: (tplSegs.filter(Boolean)[0] || '').toLowerCase(), examples: new Set(), exampleUrl }; templates.set(key, t); }
   t.examples.add(exampleId);
 }
+// Hash-routed SPA detail templates: the route lives in the '#/' fragment
+// ('/app#/case/123', '/app#/cases?caseId=<uuid>'). basePathname is the real
+// pathname serving the SPA shell ('/' or '/app').
+function addHashQueryTemplate(origin, basePathname, hashPath, param, shape, exampleId, exampleUrl) {
+  const key = `hq:${origin}${basePathname}#${hashPath}?${param}`;
+  let t = templates.get(key);
+  if (!t) { t = { kind: 'hash-query', origin, basePathname, hashPath, param, shape, seg: firstSeg(hashPath), examples: new Set(), exampleUrl }; templates.set(key, t); }
+  t.examples.add(exampleId);
+}
+function addHashPathTemplate(origin, basePathname, segs, segIndex, shape, exampleId, exampleUrl) {
+  const tplSegs = segs.slice();
+  tplSegs[segIndex] = '{id}';
+  const hashTemplate = '/' + tplSegs.join('/');
+  const key = `hp:${origin}${basePathname}#${hashTemplate}@${segIndex}`;
+  let t = templates.get(key);
+  if (!t) { t = { kind: 'hash-path', origin, basePathname, hashTemplate, segIndex, shape, seg: (tplSegs.filter(Boolean)[0] || '').toLowerCase(), examples: new Set(), exampleUrl }; templates.set(key, t); }
+  t.examples.add(exampleId);
+}
 
 for (const rec of [...requests, ...responses]) {
   let u;
@@ -165,6 +188,39 @@ for (const rec of [...requests, ...responses]) {
   for (let i = 0; i < segs.length; i++) {
     const shape = idShape(segs[i]);
     if (shape) addPathTemplate(u.origin, segs, i, shape, segs[i], rec.url);
+  }
+}
+
+// Hash-routed SPA templates: fragments are NEVER sent on the wire, so the
+// requests/responses loop above cannot see '#/case/123' routes at all — the
+// exact fan-out killer on hash-routed apps. Learn them from the crawler's
+// PAGE records and click-graph nav edges, the two captures that keep the
+// fragment.
+const hashRouteUrls = new Set();
+for (const p of pages) {
+  for (const k of [p.finalUrl, p.requestedUrl]) if (k && k.includes('#/')) hashRouteUrls.add(k);
+}
+try {
+  const cg = JSON.parse(fs.readFileSync(path.join(OUT_DIR, 'data', 'click-graph.json'), 'utf8'));
+  for (const e of (cg.edges || [])) {
+    for (const k of [e.to, e.from]) if (k && typeof k === 'string' && k.includes('#/')) hashRouteUrls.add(k);
+  }
+} catch {}
+for (const raw of hashRouteUrls) {
+  let u; try { u = new URL(raw); } catch { continue; }
+  if (!frontendOrigins.has(u.origin)) continue;
+  if (!u.hash.startsWith('#/')) continue;
+  const [hashPath, hashQuery = ''] = u.hash.slice(1).split('?');
+  if (AUTH_PATH_RE.test(hashPath)) continue;
+  for (const [param, val] of new URLSearchParams(hashQuery)) {
+    if (NOISE_PARAMS.test(param)) continue;
+    const shape = idShape(val);
+    if (shape) addHashQueryTemplate(u.origin, u.pathname, hashPath, param, shape, val, raw);
+  }
+  const hsegs = hashPath.split('/').filter(Boolean);
+  for (let i = 0; i < hsegs.length; i++) {
+    const shape = idShape(hsegs[i]);
+    if (shape) addHashPathTemplate(u.origin, u.pathname, hsegs, i, shape, hsegs[i], raw);
   }
 }
 
@@ -203,7 +259,18 @@ for (const resp of responses) {
   const coll = collectionOf(body);
   if (!coll || coll.length === 0) continue;
   let pagePath = '/'; let pageSeg = '';
-  try { const pu = new URL(resp.pageUrl); pagePath = pu.pathname; pageSeg = firstSeg(pu.pathname); } catch {}
+  try {
+    const pu = new URL(resp.pageUrl);
+    if (pu.hash.startsWith('#/')) {
+      // Hash-routed page: segment affinity comes from the fragment route
+      // ('#/cases?x' → 'cases'), not the shell pathname ('/').
+      const hp = pu.hash.slice(1).split('?')[0];
+      pagePath = pu.pathname + '#' + hp;
+      pageSeg = firstSeg(hp);
+    } else {
+      pagePath = pu.pathname; pageSeg = firstSeg(pu.pathname);
+    }
+  } catch {}
   const idFields = new Map();   // field → Set(values)
   for (const el of coll) {
     for (const { field, value } of idFieldsOf(el)) {
@@ -225,7 +292,8 @@ for (const resp of responses) {
 function baseToken(name) { return name.replace(/[_-]?id$/i, '').replace(/[_-]+/g, '').toLowerCase(); }
 function rankFields(template, pool) {
   // ordered list of [field, values[]] best-first for this template
-  const want = template.kind === 'query' ? baseToken(template.param) : template.seg;
+  const want = (template.kind === 'query' || template.kind === 'hash-query')
+    ? baseToken(template.param) : template.seg;
   const scored = [];
   for (const [field, set] of pool.idFields) {
     const vals = [...set].filter(v => idShape(v) === template.shape);
@@ -266,7 +334,9 @@ for (const t of templates.values()) {
     seen.add(url);
     const src = idSrc.get(id);
     synthesized.push({
-      url, path: new URL(url).pathname + new URL(url).search,
+      // `path` feeds pass-2 seeds (BASE_URL + path) — keep the fragment for
+      // hash-routed templates (new URL().pathname would drop it).
+      url, path: url.slice(t.origin.length),
       template: templKey(t), id, idField: src?.field, apiUrl: src?.apiUrl,
       // already CRAWLED as a page (not merely prefetched/observed in network)
       alreadyCrawled: crawledKeys.has(normKey(url)),
@@ -276,13 +346,33 @@ for (const t of templates.values()) {
 }
 
 function templKey(t) {
-  return t.kind === 'query' ? `${t.pathname}?${t.param}={id}` : t.pathTemplate;
+  switch (t.kind) {
+    case 'query':      return `${t.pathname}?${t.param}={id}`;
+    case 'path':       return t.pathTemplate;
+    case 'hash-query': return `${t.basePathname}#${t.hashPath}?${t.param}={id}`;
+    case 'hash-path':  return `${t.basePathname}#${t.hashTemplate}`;
+    default:           return t.pathTemplate || t.pathname;
+  }
 }
 function buildUrl(t, id) {
   if (t.kind === 'query') {
     const u = new URL(t.origin + t.pathname);
     u.searchParams.set(t.param, id);     // only the id param — framework noise dropped
     return u.href;
+  }
+  if (t.kind === 'hash-query') {
+    // Fragment query — built by string concat: URLSearchParams on the URL
+    // object would put the param BEFORE the '#', where the router can't see it.
+    const qs = new URLSearchParams();
+    qs.set(t.param, id);
+    return `${t.origin}${t.basePathname}#${t.hashPath}?${qs.toString()}`;
+  }
+  if (t.kind === 'hash-path') {
+    const segs = t.hashTemplate.split('/').filter(Boolean);
+    const idx = segs.findIndex((s) => s === '{id}');
+    if (idx < 0) return null;
+    segs[idx] = id;
+    return `${t.origin}${t.basePathname}#/${segs.join('/')}`;
   }
   // path template: replace the {id} segment
   const segs = t.pathTemplate.split('/').filter(Boolean);

@@ -17,6 +17,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { effectiveParts } from './lib/route-key.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
@@ -54,6 +55,16 @@ function templatePath(p) {
     if (/^[0-9a-f]{16,}$/i.test(seg)) return '{id}';
     return seg;
   }).join('/');
+}
+
+// Route path of a PAGE url, hash-SPA aware: '/app#/case/123' for '#/'-routed
+// apps, plain pathname otherwise. Page-facing grouping (sections, client
+// redirects) must use this — new URL(u).pathname collapses every hash route
+// to one path.
+function pageRoutePath(urlStr, { withSearch = false } = {}) {
+  const ep = effectiveParts(urlStr);
+  if (!ep) return urlStr;
+  return withSearch ? ep.path + ep.search : ep.path;
 }
 
 function isApi(r) {
@@ -365,7 +376,7 @@ for (const p of pagesRaw) {
   pages.push({
     requestedUrl: p.requestedUrl,
     finalUrl: pageUrl,
-    section: sectionOf(new URL(pageUrl).pathname),
+    section: sectionOf(pageRoutePath(pageUrl)),
     title: snap.title || null,
     lang: snap.lang || null,
     navStatus: p.navStatus,
@@ -445,9 +456,8 @@ const seenNavPair = new Set();
 for (const p of pagesRaw) {
   if (!p.requestedUrl || !p.finalUrl) continue;
   if (p.requestedUrl === p.finalUrl) continue;
-  let a, b;
-  try { a = new URL(p.requestedUrl).pathname + (new URL(p.requestedUrl).search || ''); } catch { a = p.requestedUrl; }
-  try { b = new URL(p.finalUrl).pathname + (new URL(p.finalUrl).search || ''); } catch { b = p.finalUrl; }
+  const a = pageRoutePath(p.requestedUrl, { withSearch: true });
+  const b = pageRoutePath(p.finalUrl, { withSearch: true });
   if (a === b) continue;
   const key = `${a} → ${b}${p.clickSelector ? ' [click ' + p.clickSelector + ']' : ''}`;
   if (seenNavPair.has(key)) continue;

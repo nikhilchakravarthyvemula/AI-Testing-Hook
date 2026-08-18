@@ -46,6 +46,29 @@ function querySignature(search) {
 }
 
 /**
+ * Effective route parts, hash-SPA aware. For '#/'-routed URLs the ROUTE lives
+ * in the fragment, so `path` embeds it ('/app#/case/123') and `search` is the
+ * fragment's query — pathname-based consumers (route-tree, synthesize,
+ * analyze) use this instead of new URL(u).pathname, which collapses every
+ * hash route into one. Returns null when the URL doesn't parse.
+ */
+export function effectiveParts(url, base) {
+  let u;
+  try { u = new URL(String(url).replace(OAUTH_HASH_RE, ''), base); }
+  catch { return null; }
+  if (u.hash.startsWith('#/')) {
+    const [hashPath, hashQuery = ''] = u.hash.slice(1).split('?');
+    return {
+      origin: u.origin,
+      path: `${u.pathname}#${hashPath}`,
+      search: hashQuery ? `?${hashQuery}` : '',
+      hashRouted: true,
+    };
+  }
+  return { origin: u.origin, path: u.pathname, search: u.search, hashRouted: false };
+}
+
+/**
  * Canonical template key for a URL. `base` resolves relative hrefs.
  * Falls back to the raw string when the URL doesn't parse.
  */

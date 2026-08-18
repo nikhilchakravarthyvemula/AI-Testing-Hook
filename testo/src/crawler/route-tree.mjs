@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { effectiveParts } from './lib/route-key.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 const OUT = path.join(REPO_ROOT, 'output', process.env.CRAWLER_OUT_DIR_NAME || 'crawler');
@@ -21,14 +22,17 @@ function tplVal(v) {
   return v;   // keep short enums like tab=overview, from=endpoints
 }
 function sig(urlStr, origins) {
-  let u; try { u = new URL(urlStr); } catch { return null; }
-  if (!origins.has(u.origin)) return null;
-  const params = [...u.searchParams]
+  // effectiveParts is hash-SPA aware: '#/'-routed apps keep their fragment
+  // route ('/app#/case/123') instead of collapsing every route to one
+  // pathname. Its `search` is the fragment's own query for those URLs.
+  const ep = effectiveParts(urlStr);
+  if (!ep || !origins.has(ep.origin)) return null;
+  const params = [...new URLSearchParams(ep.search)]
     .filter(([k]) => !NOISE.test(k))
     .map(([k, v]) => [k, tplVal(v)])
     .sort((a, b) => a[0].localeCompare(b[0]));
   const q = params.length ? '?' + params.map(([k, v]) => `${k}=${v}`).join('&') : '';
-  return u.pathname + q;
+  return ep.path.split('/').map(tplVal).join('/') + q;
 }
 
 // frontend origins = those that served HTML docs
@@ -48,7 +52,10 @@ const concretePerSig = new Map();  // sig → Set(concrete url, id stripped of n
 for (const raw of urls) {
   const s = sig(raw, origins);
   if (!s) continue;
-  let key; try { const u = new URL(raw); key = u.pathname + [...u.searchParams].filter(([k]) => !NOISE.test(k)).sort().map(([k, v]) => k + '=' + v).join('&'); } catch { key = raw; }
+  let key;
+  const ep = effectiveParts(raw);
+  if (ep) key = ep.path + [...new URLSearchParams(ep.search)].filter(([k]) => !NOISE.test(k)).sort().map(([k, v]) => k + '=' + v).join('&');
+  else key = raw;
   if (!concretePerSig.has(s)) concretePerSig.set(s, new Set());
   concretePerSig.get(s).add(key);
 }
