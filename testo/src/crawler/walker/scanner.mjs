@@ -65,6 +65,22 @@ function isStableId(id) {
   return id && !GENERATED_ID_RE.test(id);
 }
 
+// Replace generated-ID fragments ANYWHERE in a selector/key string with the
+// placeholder `{gen}`. Component libraries (Radix, HeadlessUI, MUI, …) mint a
+// fresh ID on every render, so two renders of the SAME control carry different
+// ids — any consumer that compares keys across page instances (the novelty
+// sampler's template-level dedup) must normalize first, or one volatile id per
+// page resets its dry streak forever (observed live 2026-08-17: /policies
+// instances never saturated because of `sel:#radix-_r_*_` keys). Same prefix
+// list as GENERATED_ID_RE — extend BOTH by editing that one regex.
+const GEN_ID_ANYWHERE_RE = new RegExp(
+  '#' + GENERATED_ID_RE.source.replace(/^\^/, '') + '[^\\s>.:#\\[]*',
+  'g',
+);
+export function normalizeGeneratedIds(str) {
+  return String(str).replace(GEN_ID_ANYWHERE_RE, '#{gen}');
+}
+
 // Pick the most stable selector available for a clickable. Order:
 //   testid → stable-id → href → cssPath → label → DOM-index.
 //

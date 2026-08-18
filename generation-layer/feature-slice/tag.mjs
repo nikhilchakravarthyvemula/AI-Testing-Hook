@@ -25,18 +25,12 @@ export function loadFeatureManifest(p = MANIFEST) {
 // (ids/uuids/numbers) to {id}, and drop a trailing slash. Applied to BOTH the
 // manifest keys and the row-derived keys so encoding/slash differences (e.g.
 // "/models/" vs "/models", "Resume%20Analysis" vs "Resume Analysis") match.
-export function templatizePath(pathname) {
-  let decoded = pathname;
-  try { decoded = decodeURIComponent(pathname); } catch { /* keep raw */ }
-  const t = decoded.split('/').map((seg) => {
-    if (!seg) return seg;
-    if (/^\d+$/.test(seg)) return '{id}';
-    if (/^[0-9a-fA-F]{8,}$/.test(seg)) return '{id}';
-    if (/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-/.test(seg)) return '{id}';
-    return seg;
-  }).join('/');
-  return t.length > 1 ? t.replace(/\/+$/, '') : t;
-}
+// Canonical implementation lives with the crawler (the layer that observes
+// URLs) — one definition of "same template" for walker grouping, feature
+// tagging and sampling alike. Imported + re-exported so existing importers
+// keep their `tag.mjs` import path and this file can use it internally.
+import { templatizePath } from '../../testo/src/crawler/lib/route-key.mjs';
+export { templatizePath };
 
 function buildIndex(manifest) {
   const ep = new Map();      // "METHOD /templated/path" -> featureId

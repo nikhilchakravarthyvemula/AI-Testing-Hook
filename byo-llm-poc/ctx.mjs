@@ -295,6 +295,20 @@ async function cmdScan(opts) {
     log(`[ctx] ⚠ login wall: ${authRequired.reason}`);
     log(`[ctx]   fix: ${authRequired.loginCommand}`);
   }
+
+  // Coverage verdict from the walker's route ledger (click-graph.json).
+  // A scan that stopped before frontier closure is loudly partial — the host
+  // must see it in the envelope, not discover it later in a thin report.
+  const clickGraphArtifact = readJson(path.join(OUT, 'crawler', 'data', 'click-graph.json'));
+  const coverage = clickGraphArtifact?.coverage ?? null;
+  const scanComplete = coverage ? coverage.complete : null;
+  if (coverage && !coverage.complete) {
+    log(`[ctx] ⚠ scan INCOMPLETE (stopped: ${coverage.stoppedBy}) — ` +
+        `${coverage.templates.pending.length} route template(s) never visited, ` +
+        `${coverage.urls.pending.length} URL(s) pending, ${coverage.urls.abandoned.length} abandoned`);
+    for (const t of coverage.templates.pending.slice(0, 5)) log(`[ctx]   unseen: ${t}`);
+    log(`[ctx]   fix: re-run with CRAWL_BUDGET_MS=0 (drain the frontier) and/or MAX_LIST_ITEMS_PER_NAV=5`);
+  }
   // Only CRITICAL stages gate the run's ok. Knowledge stages are best-effort:
   // a failure there is logged but leaves the indexed scan fully usable.
   const stagesOk = stages.every((s) => s.ok || s.critical === false);
@@ -307,6 +321,8 @@ async function cmdScan(opts) {
     stages,
     counts,
     configWarnings,
+    scanComplete,
+    coverage,
     authRequired: authRequired || null,
     delegations: delegation ? [delegation] : [],
     consumable: {

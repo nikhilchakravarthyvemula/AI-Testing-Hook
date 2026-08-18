@@ -20,6 +20,7 @@ import {
   selectClickable,
   selectInteractables,
 } from './scanner.mjs';
+import { routeKey } from '../lib/route-key.mjs';
 
 // Default per-page scanner. Callers may inject a different function via
 // opts.scannerFn — it just has to return the same
@@ -72,6 +73,19 @@ export function isDeadPage(page, err) {
 // group. Set MAX_LIST_ITEMS_PER_NAV=N to cap sampling to N rows per list group
 // (useful for very large tables where budget/maxPages would otherwise bound
 // the crawl); the sidebar is unaffected (each nav link is its own group).
+// Stable hash of a page's interactable STRUCTURE (kinds + labels + tags,
+// order-independent). Two instances of a template with identical structure
+// produce the same hash — the "did this sample look different?" novelty signal.
+function shapeHashOf(items) {
+  const sig = items
+    .map(it => `${it.kind}|${it.tag || ''}|${it.label || it.text || it.name || it.placeholder || ''}`)
+    .sort()
+    .join('\n');
+  let h = 5381;
+  for (let i = 0; i < sig.length; i++) h = ((h << 5) + h + sig.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
 const DEFAULT_MAX_LIST_ITEMS = (() => {
   const v = process.env.MAX_LIST_ITEMS_PER_NAV;
   if (v == null || v === '') return Infinity;           // deep by default
@@ -96,6 +110,7 @@ export async function runWorker(opts) {
     reAuth,       // optional: (page) => Promise<void>  — called on /login redirect
     scannerFn = DEFAULT_SCANNER,   // (page, opts) => { items, totalElements, rejected }
     recreatePage, // optional: async (workerId) => Page — replace a crashed page
+    apiNoveltyFor, // optional: (pageUrl) => count of first-seen API templates this page fired
   } = opts;
   // Reassignable: replaced with a fresh page when the renderer crashes.
   let { page } = opts;
@@ -226,6 +241,9 @@ export async function runWorker(opts) {
       // primary walker overrides it with a scanner that asks an LLM what
       // to click and then verifies the suggestions against the DOM.
       const scan = await scannerFn(page, { safeRe, destrRe, neverRe, sameOrigin, log });
+      // Novelty signals for this sample (fed to state.recordSample at task end).
+      const edgeKeysAdded = [];
+      const shapeHash = shapeHashOf(scan.items);
 
       const metaItems = selectInteractables(scan.items).map(it => ({
         kind: it.kind, tag: it.tag, role: it.role,
@@ -254,9 +272,14 @@ export async function runWorker(opts) {
       //
       // Two groupings, BOTH capped at maxListItemsPerNav (default 3):
       //
-      //   nav items   → grouped by URL pathname (no query). Catches
-      //                 anchor-style table rows that all go to
-      //                 `/inventory/detail?id=X` etc.
+      //   nav items   → grouped by route TEMPLATE (routeKey: pathname
+      //                 with {id}-segments collapsed + query param-name
+      //                 signature, hash-SPA aware). Catches anchor-style
+      //                 table rows whether they vary by query
+      //                 (`/detail?id=X`), by path segment
+      //                 (`/inventory/8f3ab129e4`), or by hash route
+      //                 (`#/case/123`) — raw-pathname grouping missed
+      //                 the last two.
       //
       //   click items → grouped by structural listGroupKey (the CSS
       //                 path with `:nth-of-type(N)` stripped). Catches
@@ -273,8 +296,7 @@ export async function runWorker(opts) {
       const others = [];
       for (const it of preCapped) {
         if (it.kind === 'nav' && it.href) {
-          let pathKey;
-          try { pathKey = new URL(it.href, url).pathname; } catch { pathKey = it.href; }
+          const pathKey = routeKey(it.href, url);
           if (!navByPath.has(pathKey)) navByPath.set(pathKey, []);
           navByPath.get(pathKey).push(it);
         } else if (it.kind === 'click' && it.listGroupKey) {
@@ -322,6 +344,7 @@ export async function runWorker(opts) {
                 to: cleanAbs, hadNav: true, kind: 'nav', depth, originalKind: it.kind,
                 shortcircuited: true,
               });
+              edgeKeysAdded.push(it.key);
               navShortcircuited++;
               continue;
             }
@@ -449,6 +472,7 @@ export async function runWorker(opts) {
             // so the same route isn't queued N times with varying hashes.
             const cleanedAfter = after.replace(/#(?=.*(?:state|session_state|code|iss)=)[^#]*$/, '');
             state.addEdge({ from: url, button: display, key: c.key, to: cleanedAfter, hadNav: true, kind: 'nav', depth, originalKind: c.kind });
+            edgeKeysAdded.push(c.key);
             if (sameOriginNav && !state.interactedUrls.has(cleanedAfter)) {
               if (state.enqueue({ url: cleanedAfter, depth: depth + 1, phase: 'interact-discovery', parentUrl: url })) {
                 state.markDiscovered(cleanedAfter);
@@ -478,6 +502,7 @@ export async function runWorker(opts) {
             const stateNode = `${url}#${c.key}`;
             state.addStateNode(stateNode);
             state.addEdge({ from: url, button: display, key: c.key, to: stateNode, hadNav: false, kind: 'state', depth, originalKind: c.kind });
+            edgeKeysAdded.push(c.key);
             log(`[w${workerId}]       ↳ state change → ${stateNode}`);
             // Press Escape to close any modal/dropdown the click opened.
             // After Escape the page should be back at baseline, so we
@@ -505,6 +530,17 @@ export async function runWorker(opts) {
       if (recordPage) {
         try { await recordPage(page, url, depth, phase, { workerId }); } catch {}
       }
+
+      // Report this sample's novelty — feeds the per-template saturation
+      // gate in tryDequeue. Late-landing async responses may credit an API
+      // to the NEXT sample of the same template; acceptable — it only
+      // delays saturation by one sample, never causes a false saturation.
+      const novel = state.recordSample(url, {
+        shapeHash,
+        edgeKeys: edgeKeysAdded,
+        newApis: apiNoveltyFor ? (apiNoveltyFor(url) || 0) : 0,
+      });
+      if (!novel) log(`[w${workerId}]   sample dry (no novelty for template)`);
     } catch (e) {
       const dead = isDeadPage(page, e);
       log(`[w${workerId}] task failed: ${url} — ${e.message.split('\n')[0].slice(0, 120)}`);

@@ -134,9 +134,18 @@ export function buildFeatureManifest() {
     (b.priority.openGaps - a.priority.openGaps) ||
     (b.endpoints.length - a.endpoints.length));
 
+  // Coverage honesty: route templates the walker DISCOVERED but never visited.
+  // Anything the report says about features is silent about these — surface
+  // them so "feature X: N tests" can't be mistaken for "feature X: fully seen".
+  const clickGraph = readJson(path.join(OUT, 'crawler', 'data', 'click-graph.json'));
+  const cov = clickGraph?.coverage ?? null;
+  const unscannedRoutes = cov?.templates?.pending ?? [];
+
   return {
     target: featuresDoc.target || null,
     source: 'output/features/features.json',
+    scanComplete: cov ? cov.complete : null,
+    unscannedRoutes,
     stats: {
       features: features.length,
       endpointsResolved: resolved,
@@ -144,6 +153,7 @@ export function buildFeatureManifest() {
       routes: routeCount,
       apisAvailable: apiItems.length,
       routesAvailable: (routesDoc?.endpoints || []).length,
+      unscannedRoutes: unscannedRoutes.length,
     },
     features,
   };

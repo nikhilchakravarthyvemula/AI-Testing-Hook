@@ -29,6 +29,27 @@ import { fileURLToPath } from 'node:url';
 import { adviseOn } from './llm-advisor/index.mjs';
 import { attemptSsoLogin, EXTERNAL_IDP_RE } from './auth/sso.mjs';
 import { runWalkerPool } from './walker/pool.mjs';
+import { routeKey } from './lib/route-key.mjs';
+
+// ── API-template novelty tracker (whole-app step 3) ──────────────────────────
+// First-seen API templates (METHOD + templatized URL) credited to the page
+// that fired them. The walker's novelty sampler reads this per page: a table
+// row that fires only already-seen APIs contributes no API novelty, so its
+// template saturates and the remaining N-hundred rows are sampled out.
+const API_TPL_SEEN = new Set();
+const API_NEW_BY_PAGE = new Map();   // pageUrl → count of first-seen API templates
+function noteApiForNovelty(method, url, pageUrl) {
+  const key = `${method} ${routeKey(url)}`;
+  if (API_TPL_SEEN.has(key)) return;
+  API_TPL_SEEN.add(key);
+  if (pageUrl) API_NEW_BY_PAGE.set(pageUrl, (API_NEW_BY_PAGE.get(pageUrl) || 0) + 1);
+}
+// Consumed (read + cleared) per page sample by the walker.
+function apiNoveltyFor(pageUrl) {
+  const n = API_NEW_BY_PAGE.get(pageUrl) || 0;
+  API_NEW_BY_PAGE.delete(pageUrl);
+  return n;
+}
 
 // Per-page scanner: the heuristic walker/scanner.mjs (the only scanner).
 // The LLM advisor in ./llm-advisor still augments this crawl when
@@ -156,7 +177,15 @@ const MAX_INTERACT_DEPTH = Number(process.env.MAX_INTERACT_DEPTH || 5);
 const MAX_INTERACT_PAGES = Number(process.env.MAX_INTERACT_PAGES || 200);
 // Wall-clock safety: the unified walker terminates gracefully after this
 // many ms and writes a partial graph. Tunable for slow remote SPAs.
-const CRAWL_BUDGET_MS = Number(process.env.CRAWL_BUDGET_MS || 600_000);
+// 0 = unbounded: crawl until the frontier drains (bounded by MAX_INTERACT_PAGES
+// and the list-sampling caps). Unset/blank falls back to the 30-min failsafe —
+// only an EXPLICIT 0 opts into unbounded, so a missing knob can't mean forever.
+const CRAWL_BUDGET_MS = (() => {
+  const raw = process.env.CRAWL_BUDGET_MS;
+  if (raw === undefined || raw === '') return 1_800_000;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 1_800_000;
+})();
 
 // Output dir is overridable so the LLM-primary `crawler-llm` extractor
 // can write to `output/crawler-llm/` without clobbering the heuristic
@@ -392,6 +421,9 @@ function attachListeners(page, pageUrlHint) {
     const blocked = INTERCEPT_MODE !== 'off'
       && !AUTH_ALLOW_RE.test(_url)
       && isWriteRequest(_method, _url);
+    if (request.resourceType() === 'xhr' || request.resourceType() === 'fetch') {
+      noteApiForNovelty(_method, _url, currentPageUrl());
+    }
     writeNd(streams.req, {
       ts: Date.now(),
       pageUrl: currentPageUrl(),
@@ -970,6 +1002,9 @@ if (CRAWL_DISABLED) {
     // Optional: LLM-primary scanner. Default (undefined) → worker uses
     // the heuristic scanInteractables. crawler-llm extractor switches.
     scannerFn,
+
+    // Novelty signal: first-seen API templates per page (see tracker above).
+    apiNoveltyFor,
 
     // Saved session is injected at CONTEXT CREATION (not post-hoc): this is
     // the only way IndexedDB-based sessions (Firebase Auth) restore — they

@@ -19,7 +19,7 @@
     "extract:fastapi": "ONLY=python-fastapi npm run --silent extract",
     "crawler": "cd testo/src/crawler && npm run all",
     "code-ast": "context-layer/content-extractor/_lib/.venv/bin/python context-layer/content-extractor/code-extractors/python-ast/extract.py",
-    "test:walker": "node tests/walker/crash-recovery.test.mjs"
+    "test:walker": "node tests/walker/route-key.test.mjs && node tests/walker/crash-recovery.test.mjs && node tests/walker/coverage-closure.test.mjs && node tests/walker/novelty-sampling.test.mjs"
   },
   "workspaces": [
     "testo/src/crawler"

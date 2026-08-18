@@ -61,7 +61,7 @@ export async function runWalkerPool(opts) {
     maxListItemsPerNav,        // worker.mjs has its own default
     maxDepth = 5,
     maxPages = 200,
-    budgetMs = 600_000,
+    budgetMs = 1_800_000,   // failsafe; <= 0 = unbounded (frontier closure is the stop)
     headless = true,
     postNavWaitMs = 1500,
     preDiscovery = (process.env.CRAWL_PREDISCOVERY ?? '1') !== '0',
@@ -76,6 +76,7 @@ export async function runWalkerPool(opts) {
     storageStateProvider = null,
     reAuth,
     recordPage,
+    apiNoveltyFor = null,  // (pageUrl) → count of first-seen API templates (novelty signal)
     log = console.log.bind(console),
     // Periodically write the current SharedState to checkpointPath so a
     // mid-run kill leaves usable data. Defaults to 30s. Pass null to
@@ -109,13 +110,24 @@ export async function runWalkerPool(opts) {
     catch (e) { log(`[walker-pool] invalid CRAWL_SKIP_ROUTES regex (${e.message}) — ignoring`); return null; }
   })();
 
+  // Novelty sampling knobs (whole-app step 3). Blank/invalid → defaults;
+  // NOVELTY_DRY_LIMIT=0 disables the dry gate (visit every instance).
+  const intEnv = (name, dflt) => {
+    const raw = process.env[name];
+    if (raw === undefined || raw === '') return dflt;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : dflt;
+  };
+
   const state = new SharedState({
     seeds: seedTasks,
     budgetMs, maxPages, maxDepth,
     skipRoutes,
+    noveltyDryLimit: intEnv('NOVELTY_DRY_LIMIT', 2),
+    maxSamplesPerTemplate: intEnv('MAX_SAMPLES_PER_TEMPLATE', 10),   // 0 = unbounded
   });
 
-  log(`[walker-pool] starting — seeds=${seeds.length} workers=${workerCount}(max) maxPages=${maxPages} maxDepth=${maxDepth} budget=${Math.round(budgetMs/1000)}s preDiscovery=${preDiscovery}`);
+  log(`[walker-pool] starting — seeds=${seeds.length} workers=${workerCount}(max) maxPages=${maxPages} maxDepth=${maxDepth} budget=${budgetMs > 0 ? Math.round(budgetMs / 1000) + 's' : 'unbounded (drain the frontier)'} preDiscovery=${preDiscovery}`);
 
   const browser = await chromium.launch({ headless });
 
@@ -324,7 +336,7 @@ export async function runWalkerPool(opts) {
       sameOrigin, safeRe, destrRe, neverRe,
       maxClicksPerPage, maxListItemsPerNav, postNavWaitMs,
       log, recordPage, reAuth,
-      scannerFn, recreatePage,
+      scannerFn, recreatePage, apiNoveltyFor,
     }).catch(e => {
       log(`[walker-pool] worker ${workerId} crashed: ${e.message}`);
       state.recordIssue({ type: 'worker-crashed', workerId, message: e.message });
@@ -340,7 +352,22 @@ export async function runWalkerPool(opts) {
   const exhausted = state.isBudgetExhausted();
   if (exhausted) log(`[walker-pool] budget exhausted (${exhausted}) — wrote partial graph`);
 
-  const serialized = state.serialize({ workers: effectiveWorkers, complete: !exhausted });
+  // Why did the crawl stop? 'drained' (frontier closure — the goal) vs
+  // 'time'/'pages' (failsafe fired) vs 'workers-dead' (every worker exited
+  // with tasks still queued — e.g. crash without recreation).
+  const stoppedBy = exhausted || (state.pending.length === 0 ? 'drained' : 'workers-dead');
+
+  const serialized = state.serialize({ workers: effectiveWorkers, complete: !exhausted, stoppedBy });
+  const cov = serialized.coverage;
+  log(`[walker-pool] coverage: ${cov.complete ? 'COMPLETE' : 'INCOMPLETE'} (stopped: ${stoppedBy}) — ` +
+      `templates ${cov.templates.visited} visited (${cov.templates.saturated.length} saturated) / ${cov.templates.pending.length} never seen · ` +
+      `urls ${cov.urls.visited} visited, ${cov.urls.pending.length} pending, ` +
+      `${cov.urls.abandoned.length} abandoned, ${cov.urls.skipped.length} skipped, ` +
+      `${cov.urls.saturated.length} saturated-sampled-out`);
+  if (cov.templates.pending.length) {
+    for (const t of cov.templates.pending.slice(0, 10)) log(`[walker-pool]   unseen template: ${t}`);
+    if (cov.templates.pending.length > 10) log(`[walker-pool]   … +${cov.templates.pending.length - 10} more`);
+  }
   log(`[walker-pool] done. pages=${serialized.pageCount} edges=${serialized.edgeCounts.total} (nav=${serialized.edgeCounts.nav}, state=${serialized.edgeCounts.state}) state-nodes=${serialized.stateNodes.length} new-via-click=${serialized.discoveredViaClick.length} interactable-pages=${Object.keys(serialized.interactables).length} pending-at-exit=${serialized.pendingCount} wallClock=${Math.round(serialized.wallClockMs/1000)}s`);
 
   // ── issue summary ────────────────────────────────────────────────────

@@ -56,14 +56,16 @@ export const KNOBS = {
 
   // pass-1 walker shape
   CRAWL_WORKERS:       { scope: 'pass1', def: '1', desc: 'parallel browser contexts; >1 is unsafe on rotating-token SSO apps until refresh-broadcast lands' },
-  CRAWL_BUDGET_MS:     { scope: 'pass1', def: '600000', desc: 'pass-1 wall-clock budget' },
+  CRAWL_BUDGET_MS:     { scope: 'pass1', def: '1800000', desc: 'pass-1 wall-clock failsafe; 0 = unbounded (crawl until the frontier drains; bounded by MAX_INTERACT_PAGES + list caps)' },
   MAX_INTERACT_PAGES:  { scope: 'pass1', def: '200', desc: 'pass-1 page cap' },
   MAX_INTERACT_DEPTH:  { scope: 'pass1', def: '5', desc: 'pass-1 DFS depth cap' },
   CRAWL_PREDISCOVERY:  { scope: 'pass1', def: '1', desc: 'pre-populate the queue from the seeds before fan-out' },
   WORKER_STAGGER_MS:   { scope: 'pass1', def: '2500', desc: 'delay between worker context bring-ups (0 is honored)' },
   CRAWL_CHECKPOINT_MS: { scope: 'pass1', def: '30000', desc: 'click-graph checkpoint interval' },
   CRAWL_TABLE_WAIT_MS: { scope: 'pass1', def: '30000', desc: 'max wait for async table/grid rows to populate' },
-  MAX_LIST_ITEMS_PER_NAV: { scope: 'pass1', def: '(unbounded)', desc: 'cap identical list-item drill-downs per nav group' },
+  MAX_LIST_ITEMS_PER_NAV: { scope: 'pass1', def: '(unbounded)', desc: 'fixed per-page cap on same-template list links (novelty sampling usually makes this unnecessary)' },
+  NOVELTY_DRY_LIMIT:   { scope: 'pass1', def: '2', desc: 'saturate a route template after N consecutive no-novelty samples; 0 = visit every instance' },
+  MAX_SAMPLES_PER_TEMPLATE: { scope: 'pass1', def: '10', desc: 'hard per-template sample ceiling regardless of novelty (0 = unbounded) — bounds undetected-volatility blast radius' },
   CRAWL_DISABLED:      { scope: 'pass1', def: '0', desc: 'skip the live crawl entirely' },
   CRAWL_SKIP_ROUTES:   { scope: 'pass1', def: '(none)', desc: 'regex of routes to exclude (e.g. renderer-killing pages); recorded as route-skipped' },
   SKIP_CRAWL:          { scope: 'extractor', def: '0', desc: 'reuse prior crawler output instead of re-crawling' },
@@ -180,6 +182,12 @@ export function logCrawlerConfig(log, { dotenv } = {}) {
       const w = `${name} is set but no crawler code reads it (legacy knob or typo)`;
       warnings.push(w); log(`[config] ⚠ ${w}`);
     }
+  }
+
+  // notice: unbounded crawl is a deliberate mode, not an accident — say what
+  // still bounds it so a runaway is impossible to misread.
+  if (process.env.CRAWL_BUDGET_MS === '0') {
+    log(`[config] ℹ CRAWL_BUDGET_MS=0 — unbounded crawl: runs until the frontier drains, bounded by MAX_INTERACT_PAGES=${process.env.MAX_INTERACT_PAGES || '200'} and list-sampling caps`);
   }
 
   // warn: parallel crawl on an app we can't yet keep authenticated in parallel
