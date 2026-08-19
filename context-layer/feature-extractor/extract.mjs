@@ -9,7 +9,7 @@
 // (API path segment, SPA route fragment, redirect destination, co-occurrence),
 // folds well-known segments through a synonym map, names each cluster, and rolls
 // up gaps per feature. Pure and deterministic with FEAT_LLM=0 (the default).
-// See context-layer/specs/04-feature-extractor.spec.md.
+// See docs/components/feature-extractor.spec.md.
 //
 // Env: FEAT_MIN_SIZE=2  FEAT_API_SEGMENT_DEPTH=1  FEAT_SYNONYMS=<path>
 //      FEAT_GAPS_FILE=<path>  FEAT_LLM=0

@@ -9,7 +9,7 @@
 // attributes and surface conflicts → assemble CanonicalFacts → write.
 //
 // Deterministic with SYNTH_LLM=0 (the default): identical input ⇒ byte-identical
-// output. See context-layer/specs/02-knowledge-synthesizer.spec.md.
+// output. See docs/components/knowledge-synthesizer.spec.md.
 //
 // Env:
 //   SYNTH_LLM=0        fuzzy-residue LLM matcher (1 would enable — not implemented)

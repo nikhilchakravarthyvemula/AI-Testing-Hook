@@ -8,7 +8,7 @@
 // contradictory (conflict), or unverified (low-trust), and ranks them so the
 // generators and humans work the highest-risk holes first. Pure and
 // deterministic: identical facts + coverage + env ⇒ byte-identical gaps.json.
-// See context-layer/specs/03-gap-analyzer.spec.md.
+// See docs/components/gap-analyzer.spec.md.
 //
 // Env:
 //   GAP_LOW_TRUST_CONF=0.9                       confidence floor for low-trust
