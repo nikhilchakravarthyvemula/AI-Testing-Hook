@@ -25,3 +25,6 @@ SDD - AI Testing Harness*.docx
 Interview Guide*.docx
 hsbc-followup-email.md
 *.docx
+
+# per-user source connections (internal hostnames; PATs live in the OS secret store)
+.testo/

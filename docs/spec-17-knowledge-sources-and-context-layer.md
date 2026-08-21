@@ -62,6 +62,12 @@ crawl's wall-clock).
 
 ## 3. Credentials — capture, storage, use, failure
 
+> **Scope note (2026-08-19):** this section describes the *pilot* model — individual PAT +
+> device keystore. The agreed *target* model for the dashboard era (config + secret references
+> backend-side, values in Google Secret Manager, server-side sync, scanner ingests data only) is documented
+> in [secrets-and-credentials-architecture.md](secrets-and-credentials-architecture.md); the
+> provider-chain design below is what makes that migration a config change.
+
 **Capture.** `testo auth jira --url https://jira.<host>` prompts for the PAT with echo off,
 validates it immediately (`GET /rest/api/2/myself`; Confluence: `/rest/api/user/current`), and
 refuses to store a token that doesn't authenticate. Keyed per host, so multiple instances coexist.

@@ -39,6 +39,12 @@ Verified against the working tree on 2026-08-19 (per-spec agent audit, not the s
 | [10](spec-10-output-storage-skills.md) | Output storage (Postgres/graph/bucket) | 0% | Pure design; now belongs to the SDD's hosted-service half. Fold into the web-app/spec-16 workstream rather than reviving standalone. |
 | [11](spec-11-code-standards-remediation.md) | Code-standards remediation | 5% | Backlog never executed; ~half the flagged files were deleted, not fixed. Re-run the audit on the current tree before acting. |
 
+## Architecture notes
+
+| Doc | What it locks |
+|---|---|
+| [secrets-and-credentials-architecture.md](secrets-and-credentials-architecture.md) | Credential model: pilot = individual PAT + device keystore (built); target = dashboard holds config + secret *references*, values in Google Secret Manager, sync server-side, scanner ingests data only. Includes the SDD amendments the target state needs. |
+
 ## Component specs (docs/components/)
 
 Fine-grained specs for individual context-layer components — moved here from

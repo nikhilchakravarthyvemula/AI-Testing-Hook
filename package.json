@@ -13,6 +13,8 @@
     "report:html": "node generation-layer/allure-reporter/build.mjs --generate",
     "pdf": "node generation-layer/feature-slice/report-pdf.mjs",
     "report:pdf": "node byo-llm-poc/ctx.mjs report --json",
+    "sync:jira": "node byo-llm-poc/ctx.mjs sync jira --json",
+    "sync:confluence": "node byo-llm-poc/ctx.mjs sync confluence --json",
     "extract": "node context-layer/content-extractor/run.mjs",
     "extract:live": "ONLY=crawler npm run --silent extract",
     "extract:code": "SKIP=crawler npm run --silent extract",

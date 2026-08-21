@@ -44,7 +44,10 @@ const VENV_PY = path.join(__dirname, '_lib', '.venv', 'bin', 'python');
 const STAGES = [
   {
     name: 'stage 1 — independent primary sources',
-    primary: ['framework-detector', 'crawler', 'graphify'],
+    // jira/confluence (and later tribal, spec-17) are network-bound and
+    // independent — they run alongside the crawler and finish inside its
+    // wall-clock. Unconfigured → the extractor itself skips cleanly.
+    primary: ['framework-detector', 'crawler', 'graphify', 'jira', 'confluence'],
   },
   {
     name: 'stage 2 — depends on crawler',
@@ -66,6 +69,8 @@ const GATES = {
   'openapi-probe':      null,
   graphify:             'TARGET_CODEBASE',
   'framework-detector': 'TARGET_CODEBASE',
+  jira:                 null,   // self-gates on .testo/sources.json (spec-17)
+  confluence:           null,   // self-gates on .testo/sources.json (spec-17)
 };
 
 const ONLY = (process.env.ONLY ?? '').split(',').filter(Boolean);
@@ -159,6 +164,9 @@ const RUNS = [];   // result records, populated by runSource
 //   - DO NOT wipe `output/crawler/` — the crawler self-manages its own
 //     wipe with auth-state.json preservation. Wiping it here would lose
 //     the saved SSO session.
+//   - DO NOT wipe `output/jira/` or `output/confluence/` — their bundles
+//     carry the incremental cursor and the merged issue/page set; wiping
+//     them would force a full re-fetch every run (spec-17 §4–5).
 //   - DO NOT wipe `output/indexed_output/` — the indexer overwrites all
 //     its topic files each run; leftover files are harmless.
 //   - DO NOT wipe `output/content-extraction-index.json` — overwritten

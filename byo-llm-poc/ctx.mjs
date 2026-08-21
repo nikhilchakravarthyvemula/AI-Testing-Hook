@@ -21,6 +21,9 @@ import { loadDotEnv, logCrawlerConfig } from './config.mjs';
 import { loadFeatureManifest, tagRows, summarizeFeatures, templatizePath } from '../generation-layer/feature-slice/tag.mjs';
 import { buildFeaturePdf } from '../generation-layer/feature-slice/report-pdf.mjs';
 import { attachFailureClassification, extractUiFailureFacts } from '../generation-layer/feature-slice/classify-failure.mjs';
+import { createClient, whoami, AuthError } from '../context-layer/content-extractor/_lib/atlassian-client.mjs';
+import { getSecret, setSecret, deleteSecret, secretProvider } from '../context-layer/content-extractor/_lib/secret-store.mjs';
+import { loadSourceConfig, saveSourceConfig, secretKeyFor } from '../context-layer/content-extractor/_lib/source-config.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');      // byo-llm-poc/ sits at repo root
@@ -1204,6 +1207,248 @@ async function cmdExecute(opts) {
   process.exit(ok ? 0 : 1);
 }
 
+// ── sync — fetch-only refresh of a knowledge source (spec-17 §11) ──────────
+//
+// Runs the source's extractor exactly as `scan` would (same code path, same
+// bundle), without the crawler/indexer stages. The extractor's log lines go
+// to stderr; stdout stays reserved for the one-envelope contract. ok:false +
+// authRequired in the envelope means the PAT is missing/expired — the host
+// shows the fix command and stops.
+
+async function cmdSync(opts) {
+  const source = opts._?.[0];
+  if (!['jira', 'confluence'].includes(source ?? '')) return die('usage: ctx sync jira|confluence');
+  const entry = path.join(REPO_ROOT, 'context-layer', 'content-extractor', source, 'extract.mjs');
+  const code = await new Promise((resolve) => {
+    const child = spawn('node', [entry], { stdio: ['ignore', 'pipe', 'pipe'] });
+    child.stdout.on('data', (d) => process.stderr.write(d));
+    child.stderr.on('data', (d) => process.stderr.write(d));
+    child.on('close', resolve);
+  });
+  let bundle = null;
+  try { bundle = JSON.parse(fs.readFileSync(path.join(OUT, source, 'bundle.json'), 'utf8')); } catch { /* no bundle */ }
+  emit({
+    ok: code === 0 && !bundle?.authRequired,
+    source,
+    host: bundle?.host ?? null,
+    fetchedAs: bundle?.fetchedAs ?? null,
+    tokenFrom: bundle?.tokenFrom ?? null,
+    cursor: bundle?.cursor ?? null,
+    counts: bundle?.counts ?? null,
+    acField: bundle?.acField ?? null,
+    authRequired: bundle?.authRequired ?? null,
+    bundle: bundle ? path.join('output', source, 'bundle.json') : null,
+  });
+  process.exit(code === 0 && !bundle?.authRequired ? 0 : 1);
+}
+
+// ── auth — PAT lifecycle for the Jira/Confluence knowledge sources (spec-17 §3) ──
+//
+//   ctx auth jira --url https://jira.example.internal            capture + validate + store
+//   ctx auth jira --url https://x.atlassian.net --email a@b.com  Cloud Basic mode
+//   ctx auth jira --check                                        validate stored PAT, store nothing
+//   ctx auth jira --clear                                        delete stored PAT
+//
+// The token is read from a hidden prompt (never argv), validated against the
+// instance's identity endpoint BEFORE storing (a dead token is refused), then
+// written to the OS secret store. Non-secret connection config (base URL, auth
+// mode, email) persists in .testo/sources.json so later `sync`/`scan` runs and
+// `--check` need no flags.
+
+async function cmdAuth(opts) {
+  const source = opts._?.[0];
+  if (!['jira', 'confluence'].includes(source ?? '')) {
+    return die('usage: ctx auth jira|confluence [--url <base>] [--email <e>] [--check|--clear]');
+  }
+  const saved = loadSourceConfig()[source] ?? {};
+  const baseUrl = opts.url ?? saved.baseUrl;
+  if (!baseUrl) return die(`no --url given and no saved baseUrl for ${source}`);
+  const key = secretKeyFor(source, baseUrl);
+
+  if (opts.clear) {
+    deleteSecret(key);
+    return emit({ ok: true, action: 'clear', source, host: new URL(baseUrl).host });
+  }
+
+  const authMode = (opts.email ?? saved.email) ? 'basic' : 'bearer';
+  const email = opts.email ?? saved.email ?? null;
+
+  if (opts.check) {
+    const found = getSecret(key);
+    if (!found) return emit({ ok: false, action: 'check', source, error: 'no stored token', fix: `ctx auth ${source} --url ${baseUrl}` });
+    const client = createClient({ source, baseUrl, token: found.value, authMode, email });
+    try {
+      const me = await whoami(client);
+      return emit({ ok: true, action: 'check', source, host: client.host, authMode, tokenFrom: found.from, user: me });
+    } catch (e) { return emitAuthFail('check', source, client.host, e); }
+  }
+
+  const token = await promptHidden(`${source} PAT for ${new URL(baseUrl).host}: `);
+  if (!token) return die('empty token');
+  const client = createClient({ source, baseUrl, token, authMode, email });
+  let me;
+  try { me = await whoami(client); }
+  catch (e) { return emitAuthFail('store', source, client.host, e); }
+
+  const provider = setSecret(key, token);
+  const cfgPatch = { baseUrl, authMode, ...(email ? { email } : {}) };
+
+  // Onboarding must not require a technical user (spec-17 §3): straight after
+  // the first successful auth, discover what the instance can tell us itself —
+  // custom-field ids by NAME and the visible project list — persist what is
+  // unambiguous, and put the rest in the envelope so the host walks the user
+  // through the choice in plain language. Nobody edits JSON by hand.
+  let discovered = null;
+  let next = null;
+  if (source === 'jira') {
+    discovered = await discoverJira(client);
+    if (Object.keys(discovered.fields).length) {
+      cfgPatch.fields = { ...(saved.fields ?? {}), ...discovered.fields };
+    }
+    if (!saved.projects?.length) {
+      next = 'show the user availableProjects (by name), then run: ctx setup jira --projects KEY1,KEY2';
+    }
+  } else {
+    discovered = await discoverConfluence(client);
+    if (!saved.spaces?.length) {
+      next = 'show the user availableSpaces (by name), then run: ctx setup confluence --spaces KEY1,KEY2';
+    }
+  }
+  saveSourceConfig(source, cfgPatch);
+  log(`[auth] token stored via ${provider}; config saved to .testo/sources.json`);
+
+  emit({
+    ok: true, action: 'store', source, host: client.host, authMode, user: me, provider,
+    discovered, next,
+  });
+}
+
+function emitAuthFail(action, source, host, e) {
+  emit({ ok: false, action, source, host,
+         ...(e instanceof AuthError ? { authRequired: e.authRequired } : { error: e.message }) });
+  process.exitCode = 1;
+}
+
+/** Ask the instance for everything a human would otherwise have to look up:
+ *  field ids matched by display name, and the project list the token can see. */
+async function discoverJira(client) {
+  const out = { fields: {}, fieldCandidates: {}, availableProjects: [] };
+  try {
+    const fields = await client.get('rest/api/2/field');
+    const byName = (re) => fields.filter((f) => re.test(f.name ?? ''));
+    const ac = byName(/acceptance\s*criteria/i);
+    if (ac.length === 1) out.fields.acceptanceCriteria = ac[0].id;
+    else if (ac.length > 1) out.fieldCandidates.acceptanceCriteria = ac.map((f) => ({ id: f.id, name: f.name }));
+    const epic = byName(/^epic\s*link$/i);
+    if (epic.length === 1) out.fields.epicLink = epic[0].id;
+  } catch (e) { out.fieldDiscoveryError = e.message; }
+  try {
+    const projects = await client.get('rest/api/2/project');
+    out.availableProjects = (projects ?? []).slice(0, 200).map((p) => ({ key: p.key, name: p.name }));
+  } catch (e) { out.projectDiscoveryError = e.message; }
+  return out;
+}
+
+/** Confluence's analog of discoverJira: the space list the token can see. */
+async function discoverConfluence(client) {
+  const out = { availableSpaces: [] };
+  try {
+    const page = await client.get('rest/api/space', { limit: 200, type: 'global' });
+    out.availableSpaces = (page.results ?? []).map((s) => ({ key: s.key, name: s.name }));
+  } catch (e) { out.spaceDiscoveryError = e.message; }
+  return out;
+}
+
+// ── setup — persist source scoping without hand-editing any file ───────────
+//
+//   ctx setup jira                          show config + available projects
+//   ctx setup jira --projects FRAUD,PAY     persist project selection
+//   ctx setup jira --ac-field customfield_10500   override a discovery miss
+//   ctx setup confluence --spaces FRAUD,PAY persist space selection
+
+async function cmdSetup(opts) {
+  const source = opts._?.[0];
+  if (!['jira', 'confluence'].includes(source ?? '')) {
+    return die('usage: ctx setup jira [--projects A,B] [--ac-field <id>] [--epic-field <id>] | ctx setup confluence [--spaces A,B]');
+  }
+  const saved = loadSourceConfig()[source] ?? {};
+  if (!saved.baseUrl) return die(`not authenticated yet — run: ctx auth ${source} --url <base>`);
+
+  const scopeKey = source === 'jira' ? 'projects' : 'spaces';   // what "ready" means per source
+  const patch = {};
+  if (opts.projects && source === 'jira') patch.projects = opts.projects;
+  if (opts.spaces && source === 'confluence') patch.spaces = opts.spaces;
+  if (source === 'jira' && (opts.acField || opts.epicField)) {
+    patch.fields = { ...(saved.fields ?? {}),
+      ...(opts.acField ? { acceptanceCriteria: opts.acField } : {}),
+      ...(opts.epicField ? { epicLink: opts.epicField } : {}) };
+  }
+  if (Object.keys(patch).length) saveSourceConfig(source, patch);
+
+  const cfg = loadSourceConfig()[source];
+  // Read-only invocation → also list the projects/spaces the token can see,
+  // so the host can present choices without a separate command.
+  let available = null;
+  if (!patch[scopeKey]) {
+    const found = getSecret(secretKeyFor(source, cfg.baseUrl));
+    if (found) {
+      const client = createClient({ source, baseUrl: cfg.baseUrl, token: found.value,
+                                    authMode: cfg.authMode ?? 'bearer', email: cfg.email ?? null });
+      try {
+        available = source === 'jira'
+          ? (await client.get('rest/api/2/project')).slice(0, 200).map((p) => ({ key: p.key, name: p.name }))
+          : ((await client.get('rest/api/space', { limit: 200, type: 'global' })).results ?? [])
+              .map((s) => ({ key: s.key, name: s.name }));
+      } catch { /* listed on next auth instead */ }
+    }
+  }
+  const ready = Boolean(cfg[scopeKey]?.length);
+  emit({
+    ok: true, source, ready,
+    config: {
+      baseUrl: cfg.baseUrl, authMode: cfg.authMode, [scopeKey]: cfg[scopeKey] ?? [],
+      ...(source === 'jira' ? { fields: cfg.fields ?? {} } : {}),
+    },
+    ...(available ? { [source === 'jira' ? 'availableProjects' : 'availableSpaces']: available } : {}),
+    ...(ready ? {} : { next: `ctx setup ${source} --${scopeKey} KEY1,KEY2` }),
+  });
+}
+
+/** Read one line with echo off — the PAT never appears on screen, in argv, or
+ *  in shell history. Works on a TTY (raw mode, per-keystroke) AND on piped
+ *  stdin (whole chunks, stream end = submit) so the host agent can drive auth
+ *  non-interactively: printf '%s' "$PAT" | ctx auth jira --url ... */
+function promptHidden(question) {
+  return new Promise((resolve) => {
+    process.stderr.write(question);
+    const stdin = process.stdin;
+    let buf = '';
+    let done = false;
+    const finish = () => {
+      if (done) return; done = true;
+      if (stdin.isTTY) stdin.setRawMode(false);
+      stdin.pause(); stdin.off('data', onData); stdin.off('end', finish);
+      process.stderr.write('\n');
+      resolve(buf.trim());
+    };
+    const onData = (ch) => {
+      for (const c of ch.toString('utf8')) {
+        if (c === '\r' || c === '\n' || c === '\u0004') return finish();   // enter / ctrl-D
+        if (c === '\u0003') {                                                // ctrl-C
+          if (stdin.isTTY) stdin.setRawMode(false);
+          process.stderr.write('\n'); process.exit(130);
+        }
+        if (c === '\u007f' || c === '\b') buf = buf.slice(0, -1);           // backspace
+        else buf += c;
+      }
+    };
+    stdin.resume();
+    if (stdin.isTTY) stdin.setRawMode(true);
+    stdin.on('data', onData);
+    stdin.on('end', finish);   // piped input: EOF submits
+  });
+}
+
 function main() {
   const [cmd, ...rest] = process.argv.slice(2);
   const opts = parseArgs(rest);
@@ -1218,6 +1463,9 @@ function main() {
     case 'scenarios': return cmdScenarios(opts);
     case 'report': return cmdReport(opts);
     case 'execute': return cmdExecute(opts);
+    case 'auth': return cmdAuth(opts);
+    case 'setup': return cmdSetup(opts);
+    case 'sync': return cmdSync(opts);
     case 'help': case '-h': case '--help': case undefined: return printHelp();
     default: return die(`unknown command "${cmd}". Try: ctx help`);
   }
@@ -1240,6 +1488,13 @@ function parseArgs(argv) {
       case '--keys': o.keys = true; break;               // report: print the summary worklist
       case '--perf-run': o.perfRun = true; break;        // execute: actually run jmeter
       case '--json': o.json = true; break;   // accepted; JSON is always the output
+      case '--email': o.email = next(); break;   // auth: Cloud Basic mode (email + API token)
+      case '--clear': o.clear = true; break;     // auth: delete the stored PAT
+      case '--check': o.check = true; break;     // auth: validate the stored PAT, store nothing
+      case '--projects': o.projects = next().split(',').map(s => s.trim()).filter(Boolean); break;  // setup jira
+      case '--spaces': o.spaces = next().split(',').map(s => s.trim()).filter(Boolean); break;      // setup confluence
+      case '--ac-field': o.acField = next(); break;      // setup: override acceptance-criteria field id
+      case '--epic-field': o.epicField = next(); break;  // setup: override epic-link field id
       default:
         if (a.startsWith('-')) return die(`unknown option "${a}"`);
         o._ = (o._ ?? []).concat(a);
@@ -1276,6 +1531,20 @@ Commands:
         then write a unified report (output/generation/report.md) listing every
         test (disabled ones appear as skipped). Enabled perf scenarios emit a
         JMeter plan; add --perf-run to execute it (needs jmeter on PATH).
+  ctx sync jira|confluence [--json]
+        Fetch-only refresh of a knowledge source (incremental on the stored
+        cursor). Same bundle "scan" produces; no crawl, no indexing.
+  ctx auth jira|confluence [--url <base>] [--email <e>] [--check|--clear]
+        Capture a PAT (hidden prompt), validate it against the instance, store
+        it in the OS secret store (Keychain / DPAPI; JIRA_PAT / CONFLUENCE_PAT
+        env overrides). On success auto-discovers field ids + the visible
+        project/space list and returns them in the envelope so the host can
+        guide a non-technical user. Connection config persists in
+        .testo/sources.json — never the token.
+  ctx setup jira [--projects A,B] [--ac-field <id>] [--epic-field <id>]
+  ctx setup confluence [--spaces A,B]
+        Persist project/space scoping and field overrides — the host runs this
+        after the user picks by name; nobody edits JSON by hand.
   ctx report [--keys] [--json]
         Rebuild report.{md,json} from the last run's results + host-authored
         output/generation/test-summaries.json (a per-test "what it verifies /
