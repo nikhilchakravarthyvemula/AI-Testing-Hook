@@ -619,7 +619,7 @@ off it via `parent_result_id`. UI cases are keyed by content hash, never step po
 
 | Store role | Objects |
 |---|---|
-| Postgres · relational | §3 + §4 + §6 tables (30 + audit_log) + §14 addendum (org, app_user, team_invite, auth_session, one_time_token, api_key, scan_schedule, schedule_resource, review_decision) = **40 tables** |
+| Postgres · relational | §3 + §4 + §6 tables (30 + audit_log) + §14 addendum (org, app_user, team_invite, auth_session, one_time_token, api_key, scan_schedule, schedule_resource, review_decision, scan_ticket, scan_doc_page, cross_link, member_project_access) = **44 tables** |
 | Postgres · graph | `graph_node`, `graph_edge` (AGE loads from these; CTE fallback queries them directly) |
 | Postgres · pgvector | `embedding` (untyped `vec`, per-model partial HNSW) |
 | GCS bucket | screenshots · `curls/*.sh` · `*.ui.mjs` · `plan.jmx` · `results.jtl` · `allure-report/` · `report.pdf/html/md` · raw request/response bodies · `tool-runs/ctx-*.log` · `delegation/page-*.json` · `auth-state.json` (encrypted or fingerprint-only) · `storage-manifest.json` — every object has an `artifact` row |
@@ -659,6 +659,8 @@ off it via `parent_result_id`. UI cases are keyed by content hash, never step po
 | `indexed_topic.payload` | the **post-DLP** form only; `mock-data` bodies → shapes + field names + fingerprints (raw bodies GCS-only behind `artifact.dlp_status`) |
 | `graph_node/edge.props`, `embedding.chunk_text` | projected/built exclusively from already-redacted rows — never from raw bundles |
 | `auth-state.json`, raw bodies, screenshots | GCS only; `artifact.dlp_status` gates access; separate DLP stage before any sharing |
+| `scan_ticket.payload` / `scan_doc_page.payload` | **post-DLP form only** — ticket/doc text is a secret-paste vector (tokens, DSNs, passwords in bug reports); secret-pattern scrub before insert; full corpus text GCS-only behind `dlp_status` |
+| `scan_ticket.assignee_display/reporter_display` | display **names** only — never emails (PII); excluded from export endpoints |
 
 ---
 
@@ -718,8 +720,8 @@ off it via `parent_result_id`. UI cases are keyed by content hash, never step po
 5. **Embedding models** — which model(s) → which partial HNSW indexes get created.
 6. **SSO provider** (screen 01) — which IdP backs `app_user.sso_subject`; email+password
    ships first (§14.1).
-7. **Permissions matrix** — the five roles exist (§14.1) but per-endpoint gates beyond
-   "reviewer approves/rejects" are unconfirmed (wireframe 04 note).
+7. **CI provider set** for `projects/imports/ci` — GitHub / GitLab / Azure DevOps?
+   (The former "permissions matrix" decision is resolved — §14.8 member_project_access.)
 
 ## 13. Verification plan
 
@@ -742,6 +744,15 @@ off it via `parent_result_id`. UI cases are keyed by content hash, never step po
    refresh rotates (`rotated_from` chain); replaying the OLD refresh token revokes the
    chain and 401s; logout → refresh dead; forgot→reset consumes the `one_time_token`
    (single use — second redemption fails) and revokes all sessions.
+9. Tickets/docs round-trip (§14.7): load a Jira corpus → `scan_ticket` rows + corpus
+   artifacts (`dlp_status` gated); re-push → identical counts (expression-index ON
+   CONFLICT); secret-grep `payload` columns for `eyJ`/DSN patterns → zero; reverse
+   lookup on `cross_link (scan_id, to_type, md5(to_ref))` returns an epic's children;
+   ticket/doc nodes appear in `graph_node` after projection.
+10. Access round-trip (§14.8): grant a developer 2 projects → members list shows
+    projectAccess.count=2 and projects list meta.accessibleToUser=2 for them; revoke →
+    both drop; admin sees all regardless; project create with region/tier → fields
+    round-trip on the list response.
 
 ---
 
@@ -973,11 +984,125 @@ CREATE INDEX ON review_decision (decided_at);
 - **Housekeeping (screen 24)** needs no new tables: soft/hard delete + restore act on
   `scan`/`report` via §8; `audit_log` (§6 #31) is the append-only log; per-item sizes =
   `sum(artifact.size_bytes)` grouped by scan.
-- Table count: v1.0's 31 (30 + audit_log) + **9 new** (org, app_user, team_invite,
+- Table count: v1.0's 31 (30 + audit_log) + **12 new** (org, app_user, team_invite,
   auth_session, one_time_token, api_key, scan_schedule, schedule_resource,
-  review_decision) = **40**, plus ALTERs to project, credential_ref, source, scan,
-  test_case.
+  review_decision, §14.7's scan_ticket, scan_doc_page, cross_link, and §14.8's
+  member_project_access) = **44**,
+  plus ALTERs to project, credential_ref, source, scan, test_case.
 - **Auth flow summary:** access = stateless JWT (HS256, `JWT_SECRET` from env/Secret
   Manager, TTL 30 min) — verified without a DB hit; refresh = opaque token hashed in
   `auth_session` with rotation + chain-revocation; logout revokes the session row;
   password reset / invite-accept / SSE tickets all ride `one_time_token`.
+
+### 14.7 Tickets, doc pages & cross-links (Jira · Confluence — roadmap Phase 2)
+
+_Proposed by the team; adjudicated against §1 conventions — approved with amendments:
+renumbered #43–45 (the sketch's "22" collides with `embedding`), DLP rules extended
+(A2), `method` CHECK added (A3), relationship to `graph_edge` made explicit (A4)._
+
+```mermaid
+erDiagram
+  SCAN ||--o{ SCAN_TICKET : "Jira corpus"
+  SCAN ||--o{ SCAN_DOC_PAGE : "Confluence corpus"
+  SCAN ||--o{ CROSS_LINK : "typed links"
+  ARTIFACT |o--o{ SCAN_TICKET : "corpus text (GCS)"
+  ARTIFACT |o--o{ SCAN_DOC_PAGE : "corpus text (GCS)"
+```
+
+```sql
+-- 43 ── Jira tickets observed by a scan. Row = metadata; full ticket text
+-- (description + comments) is a GCS corpus artifact (dlp_status-gated).
+-- ⚠ DLP (§9): ticket text is a classic secret-paste vector (tokens/DSNs in bug
+-- reports) — `payload` holds the POST-DLP form only; display NAMES only, never
+-- emails (PII; excluded from export endpoints like app_user/team_invite).
+CREATE TABLE scan_ticket (
+  id uuid PRIMARY KEY,
+  scan_id uuid NOT NULL REFERENCES scan(id) ON DELETE CASCADE,
+  ticket_key text NOT NULL,                  -- "FRAUD-123"
+  issue_type text, ticket_status text, priority text, summary text,
+  epic_key text, parent_key text, labels text[], components text[],
+  assignee_display text, reporter_display text,   -- names only — never emails
+  created_at_source timestamptz, updated_at_source timestamptz,
+  corpus_artifact_id uuid REFERENCES artifact(id) ON DELETE SET NULL,
+  payload jsonb NOT NULL DEFAULT '{}',       -- post-DLP form only
+  UNIQUE (scan_id, ticket_key)
+);
+
+-- 44 ── Confluence pages. Same pattern; same DLP rule on payload + corpus.
+CREATE TABLE scan_doc_page (
+  id uuid PRIMARY KEY,
+  scan_id uuid NOT NULL REFERENCES scan(id) ON DELETE CASCADE,
+  page_ref text NOT NULL,                    -- Confluence page id
+  title text, space text, labels text[], ancestors jsonb, url text,
+  doc_version int, updated_at_source timestamptz,
+  corpus_artifact_id uuid REFERENCES artifact(id) ON DELETE SET NULL,
+  payload jsonb NOT NULL DEFAULT '{}',       -- post-DLP form only
+  UNIQUE (scan_id, page_ref)
+);
+
+-- 45 ── cross-linker output: typed links across entity families.
+--   ticket↔code-file (git-log grep), ticket↔endpoint (known-literal match),
+--   doc↔ticket (structural macros), doc↔doc, epic-contains, issue-link.
+-- from/to refs are loose text (observation-style polymorphic precedent):
+--   'ticket':<ticket_key> | 'doc':<page_ref> | 'code_file':<path> |
+--   'api':<scan_api.natural_key> | 'fact':<synthesized_fact.fact_id>
+CREATE TABLE cross_link (
+  id uuid PRIMARY KEY,
+  scan_id uuid NOT NULL REFERENCES scan(id) ON DELETE CASCADE,
+  from_type text NOT NULL, from_ref text NOT NULL,
+  to_type text NOT NULL,   to_ref text NOT NULL,
+  link_type text NOT NULL,                   -- taxonomy: 'epic-contains'|'issue-link'|'documents'|
+                                             --   'references-endpoint'|'mentioned-in-commit'|'doc-links-ticket'
+                                             --   (documented, deliberately extensible — no CHECK)
+  method text NOT NULL CHECK (method IN ('structural','literal-match','git-log','inferred')),
+  confidence numeric,                        -- 0..1 (matches observation.confidence)
+  detail jsonb
+);
+-- md5() digests keep long refs (urls/paths) inside btree limits — expression
+-- index as arbiter; loaders repeat the expressions in ON CONFLICT (§8).
+CREATE UNIQUE INDEX cross_link_uq ON cross_link
+  (scan_id, from_type, md5(from_ref), to_type, md5(to_ref), link_type);
+CREATE INDEX ON cross_link (scan_id, to_type, md5(to_ref));   -- reverse lookup
+```
+
+**cross_link vs `graph_edge` (A4 — the architecture rule):** `cross_link` is the
+**relational source of record** for cross-family links — loose refs are legal (a
+`code_file` need not exist as a `graph_node` unless graphify ran). For traversal,
+ticket/doc/code nodes and their links are **projected into `graph_node`/`graph_edge`**
+(node types `ticket|doc_page` join the existing set) — the same rows→graph projection as
+Domain C→E. The feature-map (wireframe 21) then renders tickets/docs without new plumbing.
+
+**Companion wiring:** `source.kind` gains documented values `'jira'` and `'confluence'`
+(§3 #3 — the column has no CHECK, values are documented); ingest finalize (spec-18 §3.1)
+maps `output/jira|confluence/bundle.json` via ticket/doc loaders, corpus text → GCS.
+
+### 14.8 Project placement + per-project access (Global-pages API reconciliation)
+
+_From the team's Global-pages API spec (absorbed into spec-18): project onboarding fields
+confirmed as product fields, and per-project access grants — which **resolves the former
+§12 open decision "permissions matrix"**: org role governs org pages; project visibility is
+all-projects for `super_user`/`admin`, granted-rows-only for everyone else._
+
+```sql
+-- ALTERs: project onboarding + placement fields (team-confirmed)
+ALTER TABLE project
+  ADD COLUMN description text,
+  ADD COLUMN region text,                    -- meta.regionCount derives from this
+  ADD COLUMN tier text;
+
+-- 46 ── per-project access grants
+CREATE TABLE member_project_access (
+  user_id    uuid NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+  project_id uuid NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+  granted_by uuid REFERENCES app_user(id) ON DELETE SET NULL,
+  granted_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, project_id)
+);
+CREATE INDEX ON member_project_access (project_id);
+```
+
+- **Access rule:** `meta.accessibleToUser` (projects list) = count of visible projects —
+  all live projects for super_user/admin, else the member's granted rows. The `visible_*`
+  views are unchanged (soft-delete only); ACL is enforced app-layer (or RLS per §12.2).
+- `credential_ref.cred_type` documented values gain `'ci_provider'` (CI repo imports —
+  `POST /v1/orgs/{orgId}/projects/imports/ci` resolves `connectionId` → a credential_ref).
