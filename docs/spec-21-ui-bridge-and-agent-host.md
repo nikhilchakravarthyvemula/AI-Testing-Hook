@@ -42,7 +42,7 @@ distinction itself:
 1. **The spec** — `microsoft.github.io/agent-host-protocol`: Microsoft-published; multi-client;
    streaming; "monotonically-sequenced mutations broadcast from a central host to all subscribed
    clients."
-2. **The endpoint exists on this machine**, matching the documented schema exactly —
+2. **The endpoint artifact exists on this machine**, matching the documented schema exactly —
    `~/Library/Application Support/Code/agent-host/local-endpoint/entries/<sha256>.json`:
    ```json
    { "schemaVersion": 2, "type": "editor", "pid": 6198, "instanceId": "…",
@@ -52,6 +52,13 @@ distinction itself:
    ```
 3. **The client is published** — `npm view @microsoft/agent-host-protocol` → **v0.9.0**, "TypeScript
    client for the Agent Host Protocol (AHP)."
+
+> **But that entry is a corpse, and the distinction matters.** Re-checked: `pid 6198` is **dead**, the
+> socket path and even its parent directory are **gone**, and no VS Code process is running. So the
+> *file and its schema* are verified; a **live handshake has never been performed here**. Every AHP
+> claim below is documentation-grade, not run-grade. That asymmetry is the whole argument for §1's
+> ordering: **build the portable tier first and treat AHP as a swappable accelerator, never a
+> dependency.** It also makes liveness-checking mandatory (§7.4), not hygiene.
 
 `src/vs/platform/agentHost/LOCAL_ENDPOINT.md` scopes itself explicitly to outside callers: *"This
 document describes only the discoverable endpoint for external local clients."* **The testo CLI is a
@@ -81,8 +88,20 @@ BYO-LLM guarantee in `roadmap/README.md:46` holds unchanged.
 ```
 
 **Tier 1 — AHP (VS Code).** The bridge discovers the endpoint entry, connects by WebSocket over the
-Unix socket (named pipe on Windows) with `?tkn=<connectionToken>`, sends `initialize`, and holds
-**one session for the whole scan**. Each model touchpoint is a `chat/turnStarted` on that session.
+Unix socket (named pipe on Windows) with `?tkn=<connectionToken>` — a wrong or absent token is
+rejected **403 at upgrade** — sends `initialize`, subscribes `ahp-root://` and reads
+`RootState.agents[]` (each an `AgentInfo` with `provider`, `displayName`, `models`), then holds
+**one session for the whole scan**:
+
+```json
+{ "jsonrpc":"2.0", "id":2, "method":"createSession",
+  "params": { "channel":"ahp-session:/<uuid>", "provider":"copilot" } }
+```
+
+`createSession` params are `channel` (**required**), plus optional `provider`, `workingDirectories`,
+`config`, `activeClient`, `progressToken`. An unknown provider returns `-32002 "No agent for
+provider"`. Subscribe the session URI, take a chat from `SessionState.chats[]` (`defaultChat` is a
+routing hint, not a hierarchy), and subscribe that chat channel. Each model touchpoint is a `chat/turnStarted` on that session.
 Streaming is native and granular: `chat/delta`, `chat/responsePart`, `chat/toolCallStart`,
 `chat/inputRequested`, terminating in `chat/turnComplete` or `chat/error`. Sessions survive with no
 client attached, so the UI can disconnect and reattach mid-scan without killing the run.
@@ -146,6 +165,26 @@ jsonl carries `seq` — so the SSE event id is a merged cursor and a reconnectin
 `Last-Event-ID`. **Resumability falls out of the log being the source of truth**, not an in-memory
 buffer that dies with the process.
 
+### 3.1 Child-process handling — three ways this silently breaks
+
+The bridge spawns `ctx.mjs` and consumes a high-volume log. Each of these fails in a way that looks
+like something else:
+
+- **Use `spawn`, never `exec`/`execFile`.** Their default 1 MiB `maxBuffer` does not truncate output
+  — it **kills the child**. A long crawl would die partway and read as a pipeline bug.
+- **Frame with `readline.createInterface({input: child.stdout})`, never by splitting `data` chunks.**
+  Chunk boundaries do not align with newlines, so hand-splitting corrupts JSON *precisely when the
+  log is busiest*. The existing `runSkill` buffer-and-scan-for-newline loop (`ctx.mjs:536-547`) is
+  correct; do not regress it into naive `.split('\n')`.
+- **Always drain stdout**, even when discarding. The OS pipe buffer fills at roughly 64 KB and the
+  child then blocks on write — the crawl appears to hang with no error anywhere.
+
+**The reverse leg needs no WebSocket.** SSE is one-way, but the UI→bridge direction is just another
+HTTP request: `POST /runs/{id}/input`. Answering a `chat/inputRequested` or a tool confirmation does
+not justify a second transport. `POST /runs` returns **202 Accepted** with `Location: /runs/{id}`, so
+the run exists independently of whether a browser is attached — which is what makes reload, sleep and
+tab-close survivable.
+
 ---
 
 ## 4. Security
@@ -154,7 +193,11 @@ A server on `127.0.0.1` is **not** private to the machine: any web page the deve
 requests to it. The specific attack is **DNS rebinding** — an attacker-controlled domain re-resolves
 to loopback, so the browser treats the bridge as same-origin.
 
-- Bind `127.0.0.1` explicitly, never `0.0.0.0`. Ephemeral port, never a fixed well-known one.
+- **Serve the UI from the bridge's own origin.** One decision removes CORS, preflight, Chrome's
+  Local Network Access prompt and Safari's mixed-content block simultaneously — the page and the API
+  are same-origin because the bridge serves both.
+- Bind `127.0.0.1` explicitly, never `0.0.0.0`. Ephemeral port (`listen(0)`), never a fixed one;
+  publish `{port, token, pid, startedAt}` to `~/.testo/server.json` at mode `0600`.
 - **Validate the `Host` header** against an allowlist (`127.0.0.1:<port>`, `localhost:<port>`). This
   is the actual rebinding defence, because the rebound request arrives carrying the attacker's
   hostname. Validate `Origin` as well and reject anything but the bridge's own.
@@ -220,18 +263,21 @@ dispatch one turn, print the deltas. That settles §7 items 1–3 before any rea
    terms of service or enterprise policy permit a third-party product driving the harness
    programmatically via the Agent Host. This is a legal question, not a technical one, and it is the
    same *class* of constraint that already blocked MCP sampling for this client.
-2. **Harness selection from an external client is unconfirmed.** `createSession` exists and the UI
-   exposes a Session Target control, but the external-facing parameter that pins a session to
-   **Copilot specifically** was not found in the docs. If it is UI-only, an external client may get
-   whatever the default harness is.
+2. ~~**Harness selection is unconfirmed.**~~ **RESOLVED.** `provider` is a documented, optional
+   `createSession` parameter; Microsoft's own example pins `"provider":"copilot"`, and an unknown
+   value returns `-32002 "No agent for provider"`. Agents are enumerable first via
+   `RootState.agents[]`, so the bridge should **match on `AgentInfo.provider` rather than hardcode**,
+   and fail loudly rather than silently accepting whatever the default harness is.
 3. **Version skew, observed on this machine.** The endpoint advertises `protocolVersion: "0.8.0"`;
    the published npm client is `0.9.0`. Negotiation behaviour untested.
 4. **AHP is days old.** The architecture blog is dated 2026-08-26. The endpoint doc versions its entry
    schema and instructs clients to "ignore entries whose version they do not understand", but
    publishes **no stability or back-compat commitment**. Treat as a fast path with a fallback, never
    as the sole transport.
-5. **Stale entries.** The entry read here carries `pid 6198` from 19 Aug and may reference a dead
-   window. Clients must liveness-check the pid and the socket, not trust the file.
+5. **Stale entries — observed, not hypothetical.** The only entry on this machine is dead: `pid 6198`
+   gone, socket path and parent directory absent. Entries are **not** cleaned up on exit. A client
+   that trusts the file hangs or throws on connect. **Liveness-check the pid *and* `stat()` the
+   socket before every connection attempt**, and fall through to Tier 2 on failure.
 6. **Tool-call confirmations may gate on a human.** AHP defines `chat/toolCallConfirmed`,
    `chat/toolCallResultConfirmed` and a `chat/inputRequested` action; depending on harness approval
    settings an automated run can stall unless the bridge answers them or approvals are pre-configured.
